@@ -2,8 +2,8 @@
   "version": 1,
   "product": "cat-cicatrius",
   "description": "Cicatrius d'incendis forestals alineades a la malla 0.001° de Bolets Explorador",
-  "last_run_utc": "2026-09-22T17:06:56Z",
-  "last_run_europe_madrid": "2026-09-22T19:06:56+0200",
+  "last_run_utc": "2026-09-22T17:52:48Z",
+  "last_run_europe_madrid": "2026-09-22T19:52:48+0200",
   "reference_year": 2024,
   "grid": {
     "crs": "EPSG:4326",
@@ -15,12 +15,12 @@
   "files": {
     "burned_cells.parquet": {
       "path": "docs/burned_cells.parquet",
-      "sha256": "b10261111dbaf1b2f94bacaf48624fe923a6db65a07703f5eb6904e123f88a65",
-      "n_rows": 18757
+      "sha256": "84e07ebab7ab44b098ba97e1b8fbeb9cc947115f6a33d0446dd6d23b627c6162",
+      "n_rows": 18774
     },
     "burned_cells.geojson": {
       "path": "docs/burned_cells.geojson",
-      "sha256": "5935b4500b2bfa3b4d80bd51ad9d7a0bf8ae00769776f050733105156577bc38",
+      "sha256": "b3d51ff9450e454d66bf99b3f479840b73e26325a50aeab13fe72a3b11845e32",
       "note": "Summary points (may be capped); prefer parquet for full sparse set"
     }
   },
