@@ -99,24 +99,31 @@ jobs:
           if [ "${YEAR}" = "2024" ]; then
             files+=(docs/validation_2024.json docs/validation_2024.md)
           fi
+          # Stage new/updated scars + deletions of stale per-AOI files
+          git add -A -- scars/ 2>/dev/null || true
           git add "${files[@]}" 2>/dev/null || true
           if git diff --staged --quiet; then
             echo "No scars to commit"
           else
             git commit -m "data: scars sentinel ${YEAR} (max_aois=${MAX_AOIS}) [skip ci]"
+            # fetch_official/effis may leave unstaged dirt that blocks rebase
+            git stash push -u -m "prova-sentinel-pre-rebase" || true
             for i in 1 2 3 4 5; do
               git fetch origin main
               if git rebase origin/main; then
-                git push origin HEAD:main && exit 0
+                git push origin HEAD:main
+                git stash pop || true
+                exit 0
               fi
               echo "Rebase conflict on attempt $i — keep our year scars, drop conflicting docs"
               git checkout --ours scars/sentinel_${YEAR}.geojson scars/sentinel_${YEAR}_*.geojson 2>/dev/null || true
               git checkout --theirs docs/burned_cells.parquet docs/burned_cells.geojson docs/manifest.json 2>/dev/null || true
               git add scars/sentinel_${YEAR}.geojson scars/sentinel_${YEAR}_*.geojson 2>/dev/null || true
               git add docs/validation_2024.json docs/validation_2024.md 2>/dev/null || true
-              git rebase --continue || git rebase --abort || true
+              GIT_EDITOR=true git rebase --continue || git rebase --abort || true
               sleep $((i * 3))
             done
+            git stash pop || true
             echo "Failed to push scars after retries" >&2
             exit 1
           fi
