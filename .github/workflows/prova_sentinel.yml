@@ -32,8 +32,6 @@ jobs:
   prova:
     runs-on: ubuntu-latest
     env:
-      CDSE_USER: ${{ secrets.CDSE_USER }}
-      CDSE_PASSWORD: ${{ secrets.CDSE_PASSWORD }}
       YEAR: ${{ github.event.inputs.year }}
       MAX_AOIS: ${{ github.event.inputs.max_aois }}
     steps:
@@ -69,6 +67,9 @@ jobs:
         continue-on-error: true
 
       - name: Sentinel-2 dNBR (CDSE openEO)
+        env:
+          CDSE_CLIENT_ID: ${{ secrets.CDSE_CLIENT_ID }}
+          CDSE_CLIENT_SECRET: ${{ secrets.CDSE_CLIENT_SECRET }}
         run: |
           echo "Running map_scars_openeo.py --year ${YEAR} --max-aois ${MAX_AOIS}"
           python scripts/map_scars_openeo.py --year "${YEAR}" --max-aois "${MAX_AOIS}"

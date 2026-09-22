@@ -87,7 +87,7 @@ https://jnoya99.github.io/cat-cicatrius/manifest.json
   - SHP directe (patró): `http://www.gencat.cat/agricultura/sig/bases/incendis{YY}.zip` (p. ex. `incendis24.zip`)  
   - Si el zip de l’any no existeix encara: deixeu el fitxer a mà a `data/official/`  
 - EFFIS WFS: https://maps.effis.emergency.copernicus.eu/effis (capes `modis.ba.poly.{year}`, bbox ~0.15,40.5,3.35,42.9; WFS 1.0.0)  
-- CDSE: https://dataspace.copernicus.eu/ — secrets `CDSE_USER` / `CDSE_PASSWORD` (no inventar credencials)
+- CDSE: https://dataspace.copernicus.eu/ — autenticació openEO amb client OAuth (no inventar credencials)
 
 ## Avís per correu (GitHub)
 
@@ -101,12 +101,17 @@ Comprova a GitHub → **Settings** → **Notifications**:
 
 ## Secrets (opcional, pas Sentinel)
 
-Al repositori GitHub → Settings → Secrets and variables → Actions:
+### Opció B — client OAuth CDSE per a openEO (recomanada)
 
-- `CDSE_USER`
-- `CDSE_PASSWORD`
+L’automatització openEO necessita un client OAuth; `CDSE_USER` / `CDSE_PASSWORD`
+per si sols **no són suficients**. Al [Sentinel Hub Dashboard](https://shapps.dataspace.copernicus.eu/dashboard/),
+ves a **User Settings → OAuth clients**, crea un client i copia el seu client ID i secret.
+Després, al repositori GitHub → **Settings → Secrets and variables → Actions**, crea:
 
-Sense ells, el workflow **continua** amb Gencat + SHP oficial + EFFIS.
+- `CDSE_CLIENT_ID`
+- `CDSE_CLIENT_SECRET`
+
+Sense aquests dos secrets, el workflow **continua** amb Gencat + SHP oficial + EFFIS.
 
 ## Ús local
 
@@ -118,7 +123,7 @@ pip install -r requirements.txt
 python scripts/ingest_gencat.py
 python scripts/fetch_official_shp.py          # best-effort
 python scripts/fetch_effis.py                 # best-effort
-python scripts/map_scars_openeo.py            # SKIP sense CDSE_* 
+python scripts/map_scars_openeo.py            # SKIP sense CDSE_CLIENT_*
 python scripts/build_burned_cells.py
 python scripts/publish_docs.py
 ```
@@ -162,7 +167,7 @@ Workflow manual **`prova-sentinel`** (GitHub → Actions → *prova-sentinel* �
 
 Passos del workflow: checkout → Python 3.12 → `pip install -r requirements.txt` (inclou `openeo` + `rasterio`) → fetch official/EFFIS → `map_scars_openeo.py` → (2024) `validate_against_official.py` → `build_burned_cells.py` → `publish_docs.py` → commit `docs/` + `scars/sentinel_*.geojson` → avís per correu (issue).
 
-Secrets necessaris (Settings → Secrets → Actions): **`CDSE_USER`**, **`CDSE_PASSWORD`** (email + contrasenya del compte [CDSE](https://dataspace.copernicus.eu/); no s’imprimeixen als logs).
+Secrets necessaris (Settings → Secrets → Actions): **`CDSE_CLIENT_ID`** i **`CDSE_CLIENT_SECRET`** (client OAuth creat al [Sentinel Hub Dashboard](https://shapps.dataspace.copernicus.eu/dashboard/), a **User Settings → OAuth clients**). `CDSE_USER` / `CDSE_PASSWORD` no són suficients per a l’automatització openEO.
 
 Artefactes típics:
 - `scars/sentinel_{year}.geojson` (+ per AOI `scars/sentinel_{year}_{id}.geojson`)

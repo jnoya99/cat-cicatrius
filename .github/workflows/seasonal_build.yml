@@ -50,8 +50,8 @@ jobs:
 
       - name: Sentinel-2 dNBR via CDSE openEO (optional secrets)
         env:
-          CDSE_USER: ${{ secrets.CDSE_USER }}
-          CDSE_PASSWORD: ${{ secrets.CDSE_PASSWORD }}
+          CDSE_CLIENT_ID: ${{ secrets.CDSE_CLIENT_ID }}
+          CDSE_CLIENT_SECRET: ${{ secrets.CDSE_CLIENT_SECRET }}
         run: |
           # Current calendar year; AOI-capped for credits. Secrets only here.
           YEAR=$(date -u +%Y)

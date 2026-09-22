@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """CDSE openEO Sentinel-2 dNBR scars for Catalonia fire AOIs.
 
-Requires secrets (do NOT invent credentials; never print them):
-  CDSE_USER, CDSE_PASSWORD  — https://dataspace.copernicus.eu/
+Requires OAuth client secrets (do NOT invent credentials; never print them):
+  CDSE_CLIENT_ID, CDSE_CLIENT_SECRET — create them in the Sentinel Hub
+  Dashboard: https://shapps.dataspace.copernicus.eu/dashboard/
 
 CI auth (non-interactive only):
-  1) authenticate_basic(user, password)
-  2) fallback authenticate_oidc_resource_owner_password_credentials(...)
+  authenticate_oidc_client_credentials(client_id, client_secret)
+
+CDSE_USER/CDSE_PASSWORD are not used: an OAuth client is required for
+openEO automation.
 
 Pipeline:
   - Build AOIs from scars/official_{year}.geojson and/or scars/effis_{year}.geojson
@@ -56,8 +59,21 @@ class Aoi:
     seed_year: int
 
 
+def _client_credentials() -> tuple[str, str] | None:
+    """Return a complete OAuth client credential pair, if configured."""
+    for id_name, secret_name in (
+        ("CDSE_CLIENT_ID", "CDSE_CLIENT_SECRET"),
+        ("OPENEO_AUTH_CLIENT_ID", "OPENEO_AUTH_CLIENT_SECRET"),
+    ):
+        client_id = os.environ.get(id_name)
+        client_secret = os.environ.get(secret_name)
+        if client_id and client_secret:
+            return client_id, client_secret
+    return None
+
+
 def credentials_present() -> bool:
-    return bool(os.environ.get("CDSE_USER") and os.environ.get("CDSE_PASSWORD"))
+    return _client_credentials() is not None
 
 
 def skip(msg: str) -> int:
@@ -363,49 +379,31 @@ def spatial_extent(geom) -> dict:
 
 
 def connect_cdse():
-    """Non-interactive CDSE auth. Raises on failure. Never logs secrets."""
+    """Authenticate to CDSE with OAuth client credentials."""
     import openeo
 
-    user = os.environ["CDSE_USER"]
-    password = os.environ["CDSE_PASSWORD"]
-    # Log only that user is set (not the value) — mask email partially
-    user_hint = (user[:2] + "***") if len(user) > 2 else "***"
-    print(f"Connecting to {CDSE_URL} (user hint={user_hint!r}) …", flush=True)
+    credentials = _client_credentials()
+    if credentials is None:
+        raise RuntimeError(
+            "CDSE_CLIENT_ID and CDSE_CLIENT_SECRET must both be set for auth"
+        )
+    client_id, client_secret = credentials
+    print(f"Connecting to {CDSE_URL} with OAuth client credentials …", flush=True)
 
     connection = openeo.connect(CDSE_URL)
-    errors: list[str] = []
-
     try:
-        connection.authenticate_basic(user, password)
-        print("Authenticated via authenticate_basic", flush=True)
+        connection.authenticate_oidc_client_credentials(
+            client_id=client_id,
+            client_secret=client_secret,
+        )
+        print("Authenticated via authenticate_oidc_client_credentials", flush=True)
         return connection
     except Exception as e:
-        errors.append(f"authenticate_basic: {type(e).__name__}: {e}")
-        print(f"  basic auth failed ({type(e).__name__}); trying ROPC …", flush=True)
-
-    try:
-        connection = openeo.connect(CDSE_URL)
-        connection.authenticate_oidc_resource_owner_password_credentials(
-            username=user,
-            password=password,
-        )
-        print(
-            "Authenticated via authenticate_oidc_resource_owner_password_credentials",
-            flush=True,
-        )
-        return connection
-    except Exception as e:
-        errors.append(
-            f"authenticate_oidc_resource_owner_password_credentials: "
-            f"{type(e).__name__}: {e}"
-        )
-
-    raise RuntimeError(
-        "CDSE authentication failed (non-interactive). "
-        + " | ".join(errors)
-        + " — check CDSE_USER/CDSE_PASSWORD secrets and account status. "
-        "Do not use interactive authenticate_oidc() in CI."
-    )
+        raise RuntimeError(
+            "CDSE authentication failed (non-interactive): "
+            f"{type(e).__name__}: {e} — check OAuth client status and "
+            "CDSE_CLIENT_ID/CDSE_CLIENT_SECRET secrets."
+        ) from e
 
 
 def build_dnbr_cube(connection, extent: dict, pre: tuple[str, str], post: tuple[str, str]):
@@ -632,9 +630,9 @@ def main() -> int:
 
     if not credentials_present():
         return skip(
-            "CDSE_USER / CDSE_PASSWORD not set. "
-            "Add them as GitHub Actions secrets to enable Sentinel dNBR. "
-            "Pipeline continues with official/EFFIS geometry only."
+            "CDSE_CLIENT_ID / CDSE_CLIENT_SECRET not set. "
+            "Add both as GitHub Actions secrets (OAuth client) to enable "
+            "Sentinel dNBR. Pipeline continues with official/EFFIS geometry only."
         )
 
     try:
