@@ -1,0 +1,7 @@
+{
+  "year": 2024,
+  "status": "missing_sentinel",
+  "official": "/home/runner/work/cat-cicatrius/cat-cicatrius/scars/official_2024.geojson",
+  "sentinel": "/home/runner/work/cat-cicatrius/cat-cicatrius/scars/sentinel_2024.geojson",
+  "message": "No hi ha scars Sentinel per validar."
+}
