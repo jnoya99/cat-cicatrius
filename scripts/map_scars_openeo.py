@@ -12,19 +12,17 @@ CDSE_USER/CDSE_PASSWORD are not used: an OAuth client is required for
 openEO automation.
 
 Pipeline:
-  - Prefer scars/official_{year}.geojson seeds over EFFIS when present
-    (--prefer-official, default on); year-1 seeds when needed (e.g. 2026).
-  - Buffer ~800 m (official) / ~1200 m (EFFIS); +50% if seed >500 ha; merge overlaps;
-    skip tiny <~5 ha points; cap --max-aois.
-  - Per AOI: pre median S2 L2A (B08,B12,SCL) over clear-sky pre window; post:
-    2–3 sequential post composites (default +7–30/+30–60/+60–90d after fire_date,
-    or seasonal slices); dNBR per window then per-pixel maximum dNBR (recovers
-    cloud-gapped burns). Region growing: core dNBR≥threshold_core (0.35) then
-    grow contiguous neighbours ≥threshold_grow (0.22). Optional light morph
-    opening on core only. Clip scars to seed buffered 300 m; drop parts < min-ha
-    (default 1.0). Forest/scrub filter: ESA WorldCover 2021 via CDSE openEO
-    (classes 10 tree + 20 shrub); applied on GeoTIFF before polygonize.
-    Excludes cropland/built/water/bare. CLI: --post-windows N (default 3).
+  - Same-year seeds only (never year-1 locations for year Y burns):
+    official_{Y} → effis_{Y} → Gencat event points (municipality centroid).
+  - Buffer ~800 m (official/gencat) / ~1200 m (EFFIS); +50% if seed >500 ha;
+    merge overlaps; skip tiny <~5 ha points; cap --max-aois.
+  - Temporal extents are always clipped to min(end, UTC today). Empty post
+    windows after clipping are dropped; AOIs with no remaining post window
+    are skipped. Undated 2026 posts: ~Jun15→today (≤3 slices); undated past
+    years: Aug15–Nov15 seasonal slices (clipped). Dated: +7–30/+30–60/+60–90d.
+  - Per AOI: pre median S2 L2A (B08,B12,SCL); multi-post max dNBR; region-grow
+    (core≥0.35, grow≥0.22); optional morph on core; WorldCover forest/scrub
+    mask; clip to seed⊕300 m; drop parts < min-ha (default 1.0).
   - Batch jobs → GeoTIFF → local polygonize → scars/sentinel_{year}_{id}.geojson
     + combined scars/sentinel_{year}.geojson.
 
@@ -59,6 +57,7 @@ MIN_POINT_HA = 5.0  # skip tiny point-only seeds
 MIN_PART_HA = 1.0  # drop polygonized parts smaller than this
 CLIP_SEED_BUFFER_M = 300.0  # clip scars to seed ⊕ this buffer
 EFFIS_OVERLAP_FRAC = 0.3  # skip EFFIS if ≥ this fraction overlaps official
+CAT_PROVINCES_ES = {"Barcelona", "Girona", "Lleida", "Tarragona"}
 AREA_CRS = "EPSG:25831"  # Catalonia UTM 31N
 SCL_CLOUD = {3, 8, 9, 10}  # cloud shadow, cloud med/high, cirrus
 WORLDCOVER_COLLECTION = "ESA_WORLDCOVER_10M_2021_V2"
@@ -136,26 +135,77 @@ def parse_fire_date(props: dict) -> date | None:
     return None
 
 
-def pre_window_for_fire(fire_date: date | None, year: int) -> tuple[str, str]:
-    """Clear-sky pre-fire median window (unchanged strategy)."""
+def utc_today() -> date:
+    """UTC calendar date (clip target for all temporal extents)."""
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).date()
+
+
+def clip_date_range(
+    start: date, end: date, today: date | None = None
+) -> tuple[date, date] | None:
+    """Clip [start, end] to UTC today. Return None if empty/invalid after clip."""
+    today = today or utc_today()
+    end_c = min(end, today)
+    if start > today:
+        return None
+    if end_c <= start:
+        return None
+    return start, end_c
+
+
+def clip_iso_window(
+    window: tuple[str, str], today: date | None = None
+) -> tuple[str, str] | None:
+    a = date.fromisoformat(str(window[0])[:10])
+    b = date.fromisoformat(str(window[1])[:10])
+    clipped = clip_date_range(a, b, today=today)
+    if clipped is None:
+        return None
+    return clipped[0].isoformat(), clipped[1].isoformat()
+
+
+def clip_iso_windows(
+    windows: list[tuple[str, str]], today: date | None = None
+) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for w in windows:
+        c = clip_iso_window(w, today=today)
+        if c is not None:
+            out.append(c)
+    return out
+
+
+def pre_window_for_fire(
+    fire_date: date | None, year: int, today: date | None = None
+) -> tuple[str, str] | None:
+    """Clear-sky pre-fire median window, clipped to UTC today."""
+    today = today or utc_today()
     if fire_date is None:
-        return (f"{year}-04-01", f"{year}-06-15")
-    pre_end = fire_date - timedelta(days=7)
-    pre_start = fire_date - timedelta(days=75)
-    if pre_start > pre_end:
-        pre_start = pre_end - timedelta(days=45)
-    return (pre_start.isoformat(), pre_end.isoformat())
+        raw = (date(year, 4, 1), date(year, 6, 15))
+    else:
+        pre_end = fire_date - timedelta(days=7)
+        pre_start = fire_date - timedelta(days=75)
+        if pre_start > pre_end:
+            pre_start = pre_end - timedelta(days=45)
+        raw = (pre_start, pre_end)
+    clipped = clip_date_range(raw[0], raw[1], today=today)
+    if clipped is None:
+        return None
+    return clipped[0].isoformat(), clipped[1].isoformat()
 
 
 def _slice_range(start: date, end: date, n_windows: int) -> list[tuple[str, str]]:
-    """Split [start, end] into n contiguous date windows (inclusive ISO pairs)."""
+    """Split [start, end] into n contiguous date windows (ISO pairs, end>start)."""
     n_windows = max(1, int(n_windows))
-    if end < start:
-        end = start + timedelta(days=14)
+    if end <= start:
+        return []
     total_days = (end - start).days
-    if total_days < n_windows:
-        # Degenerate: repeat tiny windows rather than fail
-        return [(start.isoformat(), max(start, end).isoformat()) for _ in range(n_windows)]
+    if total_days < 1:
+        return []
+    # Cap window count when the span is short (avoid empty slices)
+    n_windows = min(n_windows, max(1, total_days))
     windows: list[tuple[str, str]] = []
     for i in range(n_windows):
         a = start + timedelta(days=int(round(total_days * i / n_windows)))
@@ -165,62 +215,78 @@ def _slice_range(start: date, end: date, n_windows: int) -> list[tuple[str, str]
             b = start + timedelta(days=int(round(total_days * (i + 1) / n_windows)))
         if b <= a:
             b = a + timedelta(days=1)
+        if b > end:
+            b = end
+        if b <= a:
+            continue
         windows.append((a.isoformat(), b.isoformat()))
     return windows
 
 
 def post_windows_for_fire(
-    fire_date: date | None, year: int, n_windows: int = 3
+    fire_date: date | None, year: int, n_windows: int = 3, today: date | None = None
 ) -> list[tuple[str, str]]:
     """Sequential post-fire composite windows for max-dNBR compositing.
 
-    With fire_date and n_windows==3 (preferred): +7–30d, +30–60d, +60–90d.
-    Otherwise: equal slices of +7d … +90d (or seasonal Aug15–Nov15 if unknown).
-    """
-    n_windows = max(1, int(n_windows))
-    if fire_date is None:
-        # Slightly longer seasonal span so late clear scenes can fill gaps
-        return _slice_range(date(year, 8, 15), date(year, 11, 15), n_windows)
+    Always clipped to UTC today; empty/invalid windows after clipping are dropped.
 
-    if n_windows == 3:
+    With fire_date and n_windows==3 (preferred): +7–30d, +30–60d, +60–90d.
+    Undated incomplete year (year == today.year): Jun15 → today, ≤n slices.
+    Undated past years: Aug15–Nov15 seasonal slices (then clipped).
+    """
+    today = today or utc_today()
+    n_windows = max(1, int(n_windows))
+    raw: list[tuple[str, str]] = []
+
+    if fire_date is None:
+        if year > today.year:
+            return []
+        if year == today.year:
+            season_start = date(year, 6, 15)
+            if season_start >= today:
+                # Fire season post window has not started / nothing past today
+                return []
+            raw = _slice_range(season_start, today, n_windows)
+        else:
+            raw = _slice_range(date(year, 8, 15), date(year, 11, 15), n_windows)
+    elif n_windows == 3:
         specs = [(7, 30), (30, 60), (60, 90)]
-        out: list[tuple[str, str]] = []
         for a_off, b_off in specs:
             a = fire_date + timedelta(days=a_off)
             b = fire_date + timedelta(days=b_off)
             if b <= a:
                 b = a + timedelta(days=14)
-            out.append((a.isoformat(), b.isoformat()))
-        return out
-
-    if n_windows == 1:
-        # Legacy-ish single post window (slightly wider than old +14–60)
+            raw.append((a.isoformat(), b.isoformat()))
+    elif n_windows == 1:
         a = fire_date + timedelta(days=7)
         b = fire_date + timedelta(days=60)
-        return [(a.isoformat(), b.isoformat())]
+        raw = [(a.isoformat(), b.isoformat())]
+    else:
+        raw = _slice_range(
+            fire_date + timedelta(days=7),
+            fire_date + timedelta(days=90),
+            n_windows,
+        )
 
-    return _slice_range(
-        fire_date + timedelta(days=7),
-        fire_date + timedelta(days=90),
-        n_windows,
-    )
+    return clip_iso_windows(raw, today=today)
 
 
 def windows_for_fire(
-    fire_date: date | None, year: int, n_post_windows: int = 3
-) -> tuple[tuple[str, str], list[tuple[str, str]]]:
-    """Return (pre_window, list_of_post_windows)."""
+    fire_date: date | None, year: int, n_post_windows: int = 3, today: date | None = None
+) -> tuple[tuple[str, str] | None, list[tuple[str, str]]]:
+    """Return (pre_window|None, list_of_post_windows) all clipped to UTC today."""
+    today = today or utc_today()
     return (
-        pre_window_for_fire(fire_date, year),
-        post_windows_for_fire(fire_date, year, n_post_windows),
+        pre_window_for_fire(fire_date, year, today=today),
+        post_windows_for_fire(fire_date, year, n_post_windows, today=today),
     )
 
 
-def seasonal_windows(year: int) -> tuple[tuple[str, str], tuple[str, str]]:
+def seasonal_windows(year: int) -> tuple[tuple[str, str] | None, tuple[str, str] | None]:
     """Back-compat: single pre + single post (first seasonal post slice)."""
     pre = pre_window_for_fire(None, year)
     posts = post_windows_for_fire(None, year, n_windows=1)
-    return pre, posts[0]
+    return pre, (posts[0] if posts else None)
 
 
 def _feature_id(props: dict, path: Path, idx: int) -> str:
@@ -252,9 +318,10 @@ def _seed_path_ok(p: Path) -> bool:
 
 
 def _buffer_m_for(source: str, area_ha: float) -> float:
-    base = BUFFER_OFFICIAL_M if source == "official" else BUFFER_EFFIS_M
-    if source == "aoi":
+    if source in ("official", "aoi", "gencat"):
         base = BUFFER_OFFICIAL_M
+    else:
+        base = BUFFER_EFFIS_M
     if area_ha >= HUGE_HA:
         base = base * 1.5
     return float(base)
@@ -283,6 +350,218 @@ def _filter_effis_nonoverlapping(official_gdf, effis_gdf):
     return effis_gdf.loc[keep_idx].copy()
 
 
+
+def _filter_effis_catalonia(effis_gdf):
+    """Keep EFFIS features in Catalonia (ES + BCN/GIR/LLE/TAR) when attrs exist."""
+    if effis_gdf is None or effis_gdf.empty:
+        return effis_gdf
+    cols = {c.upper(): c for c in effis_gdf.columns}
+    country_c = cols.get("COUNTRY")
+    province_c = cols.get("PROVINCE")
+    if country_c is None or province_c is None:
+        print(
+            "[map_scars_openeo] EFFIS lacks COUNTRY/PROVINCE — keeping all bbox features",
+            flush=True,
+        )
+        return effis_gdf
+    country = effis_gdf[country_c].astype(str).str.upper()
+    province = effis_gdf[province_c].astype(str)
+    keep = (country == "ES") & (province.isin(CAT_PROVINCES_ES))
+    before = len(effis_gdf)
+    out = effis_gdf.loc[keep].copy()
+    print(
+        f"[map_scars_openeo] EFFIS Catalonia filter: {len(out)}/{before} "
+        f"(ES + {sorted(CAT_PROVINCES_ES)})",
+        flush=True,
+    )
+    return out
+
+def _normalize_muni_code(raw: Any) -> str:
+    s = str(raw or "").strip()
+    if not s or s.lower() in ("nan", "none", "null"):
+        return ""
+    # Gencat often drops the leading province zero (80898 vs 080898)
+    if s.isdigit():
+        return s.zfill(6)
+    return s
+
+
+def _icgc_municipis_path() -> Path:
+    return TMP_DIR / "icgc_municipis_250000.geojson"
+
+
+def fetch_icgc_municipis(force: bool = False) -> Path | None:
+    """Download ICGC municipis (1:250k) GeoJSON for centroid geocoding."""
+    out = _icgc_municipis_path()
+    if out.exists() and out.stat().st_size > 1000 and not force:
+        return out
+    url = (
+        "https://geoserveis.icgc.cat/servei/catalunya/divisions-administratives/wfs"
+        "?service=WFS&version=2.0.0&request=GetFeature"
+        "&typeNames=divisions_administratives_municipis_250000"
+        "&outputFormat=GEOJSON"
+    )
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import urllib.request
+
+        print(f"[map_scars_openeo] GET ICGC municipis → {out.name}", flush=True)
+        req = urllib.request.Request(url, headers={"User-Agent": "cat-cicatrius/1.0"})
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            data = resp.read()
+        if b"FeatureCollection" not in data[:200] and b"features" not in data[:400]:
+            print(
+                f"  ICGC municipis response not GeoJSON ({len(data)} bytes); skip",
+                flush=True,
+            )
+            return None
+        out.write_bytes(data)
+        print(f"  wrote {out} ({len(data)} bytes)", flush=True)
+        return out
+    except Exception as e:
+        print(
+            f"  WARNING: ICGC municipis download failed ({type(e).__name__}: {e})",
+            flush=True,
+        )
+        return None
+
+
+def load_gencat_point_seeds(year: int, min_ha: float = MIN_POINT_HA):
+    """Build point seeds from Gencat events CSV + ICGC municipality centroids.
+
+    Uses events/gencat_current_year.csv and/or gencat_historic_2011_2024.csv /
+    gencat_events_all.csv. Rows without a matchable municipality code are skipped.
+    """
+    import geopandas as gpd
+    import pandas as pd
+
+    events_dir = ROOT / "events"
+    candidates = [
+        events_dir / "gencat_events_all.csv",
+        events_dir / "gencat_current_year.csv",
+        events_dir / "gencat_historic_2011_2024.csv",
+    ]
+    rows: list[dict] = []
+    seen_keys: set[tuple] = set()
+    for csv_path in candidates:
+        if not csv_path.exists():
+            continue
+        try:
+            df = pd.read_csv(csv_path, dtype=str).fillna("")
+        except Exception as e:
+            print(f"  skip gencat csv {csv_path.name}: {e}", flush=True)
+            continue
+        for _, r in df.iterrows():
+            d = str(r.get("data_incendi") or "")
+            if not d.startswith(str(year)):
+                continue
+            key = (
+                d[:10],
+                str(r.get("codi_municipi") or ""),
+                str(r.get("haforestal") or ""),
+                str(r.get("termemunic") or ""),
+            )
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+            rows.append(dict(r))
+    if not rows:
+        print(
+            f"[map_scars_openeo] gencat seeds: 0 events for year {year}",
+            flush=True,
+        )
+        return None
+
+    muni_path = fetch_icgc_municipis()
+    if muni_path is None:
+        print(
+            "[map_scars_openeo] gencat seeds: no municipality geometries; skip points",
+            flush=True,
+        )
+        return None
+
+    munis = gpd.read_file(muni_path)
+    if munis.crs is None:
+        munis = munis.set_crs("EPSG:4326")
+    else:
+        munis = munis.to_crs("EPSG:4326")
+    code_col = None
+    for c in ("CODIMUNI", "codimuni", "CODIGOINE", "CODIGO", "code"):
+        if c in munis.columns:
+            code_col = c
+            break
+    if code_col is None:
+        print(
+            f"[map_scars_openeo] gencat seeds: no CODIMUNI in ICGC props "
+            f"{list(munis.columns)[:12]}; skip",
+            flush=True,
+        )
+        return None
+    munis["_code"] = munis[code_col].map(_normalize_muni_code)
+    # centroid in projected CRS for stability
+    munis_m = munis.to_crs(AREA_CRS)
+    centroids = gpd.GeoSeries(munis_m.geometry.centroid, crs=AREA_CRS).to_crs("EPSG:4326")
+    code_to_pt = {
+        code: pt
+        for code, pt in zip(munis["_code"], centroids)
+        if code and pt is not None and not pt.is_empty
+    }
+
+    feats = []
+    skipped_no_loc = 0
+    skipped_tiny = 0
+    for r in rows:
+        try:
+            ha = float(r.get("haforestal") or 0)
+        except (TypeError, ValueError):
+            ha = 0.0
+        if ha < min_ha:
+            skipped_tiny += 1
+            continue
+        code = _normalize_muni_code(r.get("codi_municipi"))
+        pt = code_to_pt.get(code)
+        if pt is None:
+            skipped_no_loc += 1
+            continue
+        fire_d = parse_fire_date(
+            {
+                "data_incendi": r.get("data_incendi"),
+                "DATE": r.get("data_incendi"),
+            }
+        )
+        fid = re.sub(
+            r"[^A-Za-z0-9_-]+",
+            "_",
+            f"gencat_{code}_{(r.get('data_incendi') or '')[:10]}",
+        )[:40]
+        feats.append(
+            {
+                "id": fid,
+                "FIREDATE": fire_d.isoformat() if fire_d else "",
+                "fire_date": fire_d.isoformat() if fire_d else "",
+                "data_incendi": r.get("data_incendi") or "",
+                "AREA_HA": ha,
+                "termemunic": r.get("termemunic") or "",
+                "codi_municipi": code,
+                "geometry": pt,
+            }
+        )
+
+    print(
+        f"[map_scars_openeo] gencat seeds year={year}: kept={len(feats)} "
+        f"skipped_tiny(<{min_ha}ha)={skipped_tiny} skipped_no_location={skipped_no_loc} "
+        f"from {len(rows)} event rows",
+        flush=True,
+    )
+    if not feats:
+        return None
+    gdf = gpd.GeoDataFrame(feats, geometry="geometry", crs="EPSG:4326")
+    gdf["_seed_path"] = "gencat_events"
+    gdf["_seed_year"] = year
+    gdf["_source"] = "gencat"
+    return gdf
+
+
 def load_seed_geodataframes(
     year: int, aoi_path: Path | None, prefer_official: bool = True
 ):
@@ -292,47 +571,36 @@ def load_seed_geodataframes(
     paths: list[Path] = []
     n_official = 0
     n_effis = 0
+    n_gencat = 0
     n_effis_skipped = 0
 
     if aoi_path is not None:
         paths = [aoi_path]
     else:
-        for y in (year, year - 1):
-            official_p = SCARS_DIR / f"official_{y}.geojson"
-            effis_p = SCARS_DIR / f"effis_{y}.geojson"
-            has_official = _seed_path_ok(official_p)
-            has_effis = _seed_path_ok(effis_p)
-            if has_official:
-                paths.append(official_p)
-            if has_effis:
-                # Same-year: skip EFFIS entirely when official exists and prefer_official
-                if prefer_official and has_official and y == year:
-                    print(
-                        f"[map_scars_openeo] prefer-official: skipping {effis_p.name} "
-                        f"(official_{y} present)",
-                        flush=True,
-                    )
-                    n_effis_skipped += 1
-                else:
-                    paths.append(effis_p)
-        seen = set()
-        uniq = []
-        for p in paths:
-            if p.resolve() not in seen:
-                seen.add(p.resolve())
-                uniq.append(p)
-        paths = uniq
-
-    same_year = [p for p in paths if f"_{year}." in p.name or f"_{year}_" in p.name]
-    if same_year:
-        paths = same_year
-    elif year >= 2026:
-        print(
-            f"[map_scars_openeo] No same-year seed for {year}; "
-            f"using year-1 / available layers as geographic seeds "
-            f"with {year} seasonal windows.",
-            flush=True,
-        )
+        # Same-year seeds ONLY — never seed year Y from Y-1 fire places.
+        official_p = SCARS_DIR / f"official_{year}.geojson"
+        effis_p = SCARS_DIR / f"effis_{year}.geojson"
+        has_official = _seed_path_ok(official_p)
+        has_effis = _seed_path_ok(effis_p)
+        if has_official:
+            paths.append(official_p)
+        if has_effis:
+            if prefer_official and has_official:
+                print(
+                    f"[map_scars_openeo] prefer-official: skipping {effis_p.name} "
+                    f"(official_{year} present)",
+                    flush=True,
+                )
+                n_effis_skipped += 1
+            else:
+                paths.append(effis_p)
+        if not paths:
+            print(
+                f"[map_scars_openeo] No same-year official/EFFIS seed for {year} "
+                f"(will try Gencat points if available). "
+                f"Year-1 fallback is disabled.",
+                flush=True,
+            )
 
     loaded_by_key: dict[tuple[str, int], Any] = {}
     pending: list[tuple[Path, Any]] = []
@@ -354,6 +622,13 @@ def load_seed_geodataframes(
         m = re.search(r"(official|effis)_(\d{4})", p.name)
         if m:
             seed_year = int(m.group(2))
+            if seed_year != year:
+                print(
+                    f"[map_scars_openeo] REFUSING cross-year seed {p.name} "
+                    f"(seed_year={seed_year} != {year})",
+                    flush=True,
+                )
+                continue
         source = (
             "official"
             if "official" in p.name.lower()
@@ -362,6 +637,11 @@ def load_seed_geodataframes(
         gdf["_seed_path"] = p.name
         gdf["_seed_year"] = seed_year
         gdf["_source"] = source
+        if source == "effis":
+            gdf = _filter_effis_catalonia(gdf)
+            if gdf.empty:
+                print(f"  no Catalonia EFFIS features left in {p.name}", flush=True)
+                continue
         pending.append((p, gdf))
         loaded_by_key[(source, seed_year)] = gdf
 
@@ -388,14 +668,21 @@ def load_seed_geodataframes(
             n_effis += len(gdf)
         frames.append(gdf)
 
+    # Secondary: Gencat tabular events → municipality centroids (same year only)
+    if aoi_path is None:
+        gencat = load_gencat_point_seeds(year)
+        if gencat is not None and not gencat.empty:
+            n_gencat = len(gencat)
+            frames.append(gencat)
+
     print(
         f"[map_scars_openeo] seed sources: official={n_official} "
-        f"effis={n_effis} effis_skipped_overlap_or_prefer={n_effis_skipped} "
-        f"prefer_official={prefer_official}",
+        f"effis={n_effis} gencat={n_gencat} "
+        f"effis_skipped_overlap_or_prefer={n_effis_skipped} "
+        f"prefer_official={prefer_official} (same-year only)",
         flush=True,
     )
     return frames
-
 
 def build_aois(
     year: int,
@@ -453,7 +740,7 @@ def build_aois(
         seed_m = geom
         buffered = geom.buffer(buf)
         fire_d = parse_fire_date(props)
-        # If seed is from prior year (2026 case), ignore old fire dates → seasonal defaults
+        # Same-year seeds only; if a mismatched seed slipped through, drop its date
         seed_year = int(row.get("_seed_year", year))
         if seed_year != year:
             fire_d = None
@@ -940,12 +1227,28 @@ def run_aoi_job(
     post_windows: int = 3,
 ) -> Path | None:
     pre, posts = windows_for_fire(aoi.fire_date, year, n_post_windows=post_windows)
+    today = utc_today()
+    if not posts:
+        print(
+            f"  SKIP AOI {aoi.aoi_id}: no valid post window after clipping to "
+            f"UTC today={today.isoformat()} (fire_date={aoi.fire_date})",
+            flush=True,
+        )
+        return None
+    if pre is None:
+        print(
+            f"  SKIP AOI {aoi.aoi_id}: no valid pre window after clipping to "
+            f"UTC today={today.isoformat()} (fire_date={aoi.fire_date})",
+            flush=True,
+        )
+        return None
     extent = spatial_extent(aoi.geometry)
     posts_str = "; ".join(f"{a}→{b}" for a, b in posts)
     print(
         f"  AOI {aoi.aoi_id}: area_buf≈{aoi.area_ha:.1f} ha source={aoi.source} "
         f"buffer_m={aoi.buffer_m:.0f} fire_date={aoi.fire_date} pre={pre} "
-        f"post_windows({len(posts)})=[{posts_str}] extent={extent}",
+        f"post_windows({len(posts)})=[{posts_str}] today_utc={today.isoformat()} "
+        f"extent={extent}",
         flush=True,
     )
     if dry_run:
@@ -1071,7 +1374,7 @@ def write_combined(year: int, paths: list[Path]) -> Path:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--year", type=int, default=date.today().year, help="Burn year (e.g. 2024|2026)")
+    ap.add_argument("--year", type=int, default=date.today().year, help="Burn year (e.g. 2024|2025|2026)")
     ap.add_argument("--max-aois", type=int, default=15, help="Cap AOIs (largest first); CI default 15")
     ap.add_argument("--aoi", type=Path, default=None, help="Optional GeoJSON AOI override")
     ap.add_argument(
@@ -1194,15 +1497,43 @@ def main() -> int:
             "Refusing full-Catalonia cube to save credits."
         )
 
-    print(f"[map_scars_openeo] {len(aois)} AOIs queued:", flush=True)
+    today = utc_today()
+    print(
+        f"[map_scars_openeo] UTC today={today.isoformat()} "
+        f"(all temporal extents clipped to today)",
+        flush=True,
+    )
+    usable: list[Aoi] = []
     for a in aois:
         pre_w, post_w = windows_for_fire(a.fire_date, args.year, n_post_windows=n_post)
+        if not post_w:
+            print(
+                f"  - SKIP {a.aoi_id}: no post window after clip to {today.isoformat()} "
+                f"(fire={a.fire_date}, src={a.source})",
+                flush=True,
+            )
+            continue
+        if pre_w is None:
+            print(
+                f"  - SKIP {a.aoi_id}: no pre window after clip to {today.isoformat()} "
+                f"(fire={a.fire_date}, src={a.source})",
+                flush=True,
+            )
+            continue
         posts_str = ", ".join(f"{x}→{y}" for x, y in post_w)
         print(
             f"  - {a.aoi_id}: ~{a.area_ha:.0f} ha buf, buffer_m={a.buffer_m:.0f}, "
             f"fire={a.fire_date}, src={a.source}, pre={pre_w[0]}→{pre_w[1]}, "
             f"posts=[{posts_str}]",
             flush=True,
+        )
+        usable.append(a)
+    aois = usable
+    print(f"[map_scars_openeo] {len(aois)} AOIs queued after temporal clip", flush=True)
+    if not aois:
+        return skip(
+            f"all AOIs lacked valid pre/post windows after clipping to UTC today="
+            f"{today.isoformat()}"
         )
 
     if args.dry_run:

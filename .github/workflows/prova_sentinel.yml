@@ -7,11 +7,12 @@ name: prova-sentinel
   workflow_dispatch:
     inputs:
       year:
-        description: "Any de cicatrius (2024 validació oficial; 2026 temporada actual)"
+        description: "Any de cicatrius (2024 validació; 2025; 2026 temporada actual)"
         required: true
         type: choice
         options:
           - "2024"
+          - "2025"
           - "2026"
         default: "2024"
       max_aois:
@@ -57,13 +58,12 @@ jobs:
         run: python scripts/fetch_official_shp.py --years ${{ env.YEAR }}
         continue-on-error: true
 
-      - name: Fetch EFFIS for year (+ year-1 seed if 2026)
-        run: |
-          if [ "${YEAR}" = "2026" ]; then
-            python scripts/fetch_effis.py --years 2026 2025
-          else
-            python scripts/fetch_effis.py --years ${YEAR}
-          fi
+      - name: Ingest Gencat events (best-effort, for point seeds)
+        run: python scripts/ingest_gencat.py
+        continue-on-error: true
+
+      - name: Fetch EFFIS for year (same-year only; rolling layer fallback)
+        run: python scripts/fetch_effis.py --years ${YEAR}
         continue-on-error: true
 
       - name: Sentinel-2 dNBR (CDSE openEO)
@@ -201,7 +201,7 @@ jobs:
               `Manifest: https://jnoya99.github.io/cat-cicatrius/manifest.json`,
               year === '2024'
                 ? 'Validació: `docs/validation_2024.json` / `docs/validation_2024.md`'
-                : 'Nota 2026: si falta EFFIS/oficial de l\'any, es fan servir llavors year-1 + finestres estacionals.',
+                : 'Llavors mateixa any només (EFFIS rolling / oficial / Gencat municipi); finestres post retallades a avui (UTC).',
               '',
               '_Issue automàtic per generar el correu de GitHub; es tanca tot seguit._',
             ].join('\n');
