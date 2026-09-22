@@ -18,6 +18,7 @@ concurrency:
 
 permissions:
   contents: write
+  issues: write
 
 jobs:
   build:
@@ -73,3 +74,41 @@ jobs:
             git pull --rebase origin main
             git push
           fi
+
+      - name: Avisa per correu de GitHub (issue + @mention)
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const ok = '${{ job.status }}' === 'success';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const title = ok
+              ? 'Cicatrius: Action estacional OK'
+              : 'Cicatrius: Action estacional FALLADA';
+            const body = [
+              '@jnoya99',
+              '',
+              ok
+                ? "L'Action **seasonal-build** ha acabat **bé**."
+                : "L'Action **seasonal-build** ha **fallat**.",
+              '',
+              `Run: ${runUrl}`,
+              `Manifest: https://jnoya99.github.io/cat-cicatrius/manifest.json`,
+              '',
+              '_Issue automàtic per generar el correu de GitHub; es tanca tot seguit._',
+            ].join('\n');
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title,
+              body,
+              labels: ['avis-estacional'],
+            });
+            await github.rest.issues.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: issue.data.number,
+              state: 'closed',
+            });
+            core.info(`Issue #${issue.data.number} creada i tancada (correu via @mention)`);
+

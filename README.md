@@ -88,6 +88,16 @@ https://jnoya99.github.io/cat-cicatrius/manifest.json
 - EFFIS WFS: https://maps.effis.emergency.copernicus.eu/effis (capes `modis.ba.poly.{year}`, bbox ~0.15,40.5,3.35,42.9; WFS 1.0.0)  
 - CDSE: https://dataspace.copernicus.eu/ — secrets `CDSE_USER` / `CDSE_PASSWORD` (no inventar credencials)
 
+## Avís per correu (GitHub)
+
+Al final de cada `seasonal-build` (cron o manual), el workflow obre i tanca un **issue** etiquetat `avis-estacional` amb `@jnoya99`. Això fa que GitHub t’enviï un **correu** (notificació de participació), tant si ha anat bé com si ha fallat.
+
+Comprova a GitHub → **Settings** → **Notifications**:
+- correu activat per a **Participating**;
+- i, opcional, a **Actions** les fallades de workflow.
+
+---
+
 ## Secrets (opcional, pas Sentinel)
 
 Al repositori GitHub → Settings → Secrets and variables → Actions:
