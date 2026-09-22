@@ -21,7 +21,7 @@ name: prova-sentinel
         default: "12"
 
 concurrency:
-  group: prova-sentinel-${{ github.event.inputs.year }}
+  group: prova-sentinel  # una sola prova a la vegada (evita conflictes docs/)
   cancel-in-progress: false
 
 permissions:
@@ -78,27 +78,81 @@ jobs:
         if: env.YEAR == '2024'
         run: python scripts/validate_against_official.py --year 2024
 
+      - name: Upload sentinel scars (backup si falla el push)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentinel-${{ env.YEAR }}
+          path: |
+            scars/sentinel_${{ env.YEAR }}.geojson
+            scars/sentinel_${{ env.YEAR }}_*.geojson
+            docs/validation_${{ env.YEAR }}.*
+          if-no-files-found: ignore
+
+      - name: Commit scars (sense docs binaris)
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          shopt -s nullglob
+          files=(scars/sentinel_${YEAR}.geojson scars/sentinel_${YEAR}_*.geojson)
+          if [ "${YEAR}" = "2024" ]; then
+            files+=(docs/validation_2024.json docs/validation_2024.md)
+          fi
+          git add "${files[@]}" 2>/dev/null || true
+          if git diff --staged --quiet; then
+            echo "No scars to commit"
+          else
+            git commit -m "data: scars sentinel ${YEAR} (max_aois=${MAX_AOIS}) [skip ci]"
+            for i in 1 2 3 4 5; do
+              git fetch origin main
+              if git rebase origin/main; then
+                git push origin HEAD:main && exit 0
+              fi
+              echo "Rebase conflict on attempt $i — keep our year scars, drop conflicting docs"
+              git checkout --ours scars/sentinel_${YEAR}.geojson scars/sentinel_${YEAR}_*.geojson 2>/dev/null || true
+              git checkout --theirs docs/burned_cells.parquet docs/burned_cells.geojson docs/manifest.json 2>/dev/null || true
+              git add scars/sentinel_${YEAR}.geojson scars/sentinel_${YEAR}_*.geojson 2>/dev/null || true
+              git add docs/validation_2024.json docs/validation_2024.md 2>/dev/null || true
+              git rebase --continue || git rebase --abort || true
+              sleep $((i * 3))
+            done
+            echo "Failed to push scars after retries" >&2
+            exit 1
+          fi
+
       - name: Build burned cells on app 0.001° grid
-        run: python scripts/build_burned_cells.py --reference-year "${YEAR}"
+        run: |
+          git pull --ff-only origin main || git pull --rebase origin main
+          python scripts/build_burned_cells.py --reference-year "${YEAR}"
 
       - name: Publish docs/ + manifest
         run: python scripts/publish_docs.py --reference-year "${YEAR}"
 
-      - name: Commit docs/scars if changed
+      - name: Commit docs product
         run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # Avoid fatal pathspec when sentinel_*.geojson does not exist yet
-          shopt -s nullglob
-          git add docs/ || true
-          git add scars/*.geojson || true
+          git add docs/burned_cells.parquet docs/burned_cells.geojson docs/manifest.json
           if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "data: prova sentinel ${YEAR} (max_aois=${MAX_AOIS}) [skip ci]"
-            git pull --rebase --autostash origin main
-            git push
+            echo "No docs changes"
+            exit 0
           fi
+          git commit -m "data: docs after sentinel ${YEAR} [skip ci]"
+          for i in 1 2 3 4 5; do
+            git fetch origin main
+            if git rebase origin/main; then
+              git push origin HEAD:main && exit 0
+            fi
+            # Binary docs: keep the just-rebuilt copy
+            git checkout --ours docs/burned_cells.parquet docs/burned_cells.geojson docs/manifest.json
+            git add docs/burned_cells.parquet docs/burned_cells.geojson docs/manifest.json
+            GIT_EDITOR=true git rebase --continue || true
+            sleep $((i * 3))
+          done
+          echo "Failed to push docs after retries" >&2
+          exit 1
 
       - name: Avisa per correu de GitHub (issue + @mention)
         if: always()
