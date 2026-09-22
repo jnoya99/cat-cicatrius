@@ -2,8 +2,8 @@
   "version": 1,
   "product": "cat-cicatrius",
   "description": "Cicatrius d'incendis forestals alineades a la malla 0.001° de Bolets Explorador",
-  "last_run_utc": "2026-09-22T05:21:30Z",
-  "last_run_europe_madrid": "2026-09-22T07:21:30+0200",
+  "last_run_utc": "2026-09-22T06:56:41Z",
+  "last_run_europe_madrid": "2026-09-22T08:56:41+0200",
   "reference_year": 2026,
   "grid": {
     "crs": "EPSG:4326",
