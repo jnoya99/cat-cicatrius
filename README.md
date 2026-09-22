@@ -46,7 +46,8 @@ dense_index = jj * NLON + ii
 | `scripts/ingest_gencat.py` | Taules Socrata → `events/*.csv` |
 | `scripts/fetch_official_shp.py` | Baixa `incendis{YY}.zip` de gencat.cat → GeoJSON a `scars/` |
 | `scripts/fetch_effis.py` | WFS EFFIS bbox Catalunya (best-effort) |
-| `scripts/map_scars_openeo.py` | Esquelet CDSE openEO dNBR (salta si no hi ha secrets) |
+| `scripts/map_scars_openeo.py` | CDSE openEO Sentinel-2 dNBR per AOI (salta si no hi ha secrets) |
+| `scripts/validate_against_official.py` | IoU/P/R/F1 Sentinel vs oficial (malla 0.001°) |
 | `scripts/build_burned_cells.py` | Polígons → cel·les 0.001° → `docs/burned_cells.parquet` |
 | `scripts/publish_docs.py` | Manifest + checksums a `docs/manifest.json` |
 | **GitHub Pages / raw / jsDelivr** | Consumeix `docs/` |
@@ -149,3 +150,28 @@ scripts/                # pipeline
 - NASA FIRMS (només si s’afegeix algun dia; **no** forma part del pla actual)
 
 Codi: MIT (vegeu `LICENSE`). Les dades respecten la llicència de cada proveïdor.
+
+## Proves 2024 / 2026
+
+Workflow manual **`prova-sentinel`** (GitHub → Actions → *prova-sentinel* → *Run workflow*):
+
+| Input | Valors | Notes |
+|---|---|---|
+| `year` | `2024` o `2026` | 2024 valida contra `official_2024`; 2026 usa finestres d’estiu i, si cal, llavors EFFIS/oficial de l’any anterior |
+| `max_aois` | p. ex. `8`–`12` | Limita crèdits CDSE (les AOIs més grans primer) |
+
+Passos del workflow: checkout → Python 3.12 → `pip install -r requirements.txt` (inclou `openeo` + `rasterio`) → fetch official/EFFIS → `map_scars_openeo.py` → (2024) `validate_against_official.py` → `build_burned_cells.py` → `publish_docs.py` → commit `docs/` + `scars/sentinel_*.geojson` → avís per correu (issue).
+
+Secrets necessaris (Settings → Secrets → Actions): **`CDSE_USER`**, **`CDSE_PASSWORD`** (email + contrasenya del compte [CDSE](https://dataspace.copernicus.eu/); no s’imprimeixen als logs).
+
+Artefactes típics:
+- `scars/sentinel_{year}.geojson` (+ per AOI `scars/sentinel_{year}_{id}.geojson`)
+- `docs/validation_2024.json` / `docs/validation_2024.md` (només any 2024)
+
+CLI local (sense secrets → skip net exit 0):
+
+```bash
+python scripts/map_scars_openeo.py --year 2024 --max-aois 8 --dry-run
+python scripts/validate_against_official.py --year 2024
+```
+

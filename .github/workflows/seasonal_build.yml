@@ -52,7 +52,10 @@ jobs:
         env:
           CDSE_USER: ${{ secrets.CDSE_USER }}
           CDSE_PASSWORD: ${{ secrets.CDSE_PASSWORD }}
-        run: python scripts/map_scars_openeo.py
+        run: |
+          # Current calendar year; AOI-capped for credits. Secrets only here.
+          YEAR=$(date -u +%Y)
+          python scripts/map_scars_openeo.py --year "${YEAR}" --max-aois 15
         continue-on-error: true
 
       - name: Build burned cells on app 0.001° grid
