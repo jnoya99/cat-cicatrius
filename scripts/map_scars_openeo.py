@@ -12,10 +12,12 @@ CDSE_USER/CDSE_PASSWORD are not used: an OAuth client is required for
 openEO automation.
 
 Pipeline:
-  - Build AOIs from scars/official_{year}.geojson and/or scars/effis_{year}.geojson
-    (and year-1 when needed, e.g. 2026 season still without official/EFFIS layers).
-  - Buffer ~2–3 km, merge overlaps, skip tiny <~5 ha if only points; cap --max-aois.
-  - Per AOI: pre/post median S2 L2A (B08,B12,SCL), cloud-mask SCL, NBR, dNBR≥0.12.
+  - Prefer scars/official_{year}.geojson seeds over EFFIS when present
+    (--prefer-official, default on); year-1 seeds when needed (e.g. 2026).
+  - Buffer ~800 m (official) / ~1200 m (EFFIS); +50% if seed >500 ha; merge overlaps;
+    skip tiny <~5 ha points; cap --max-aois.
+  - Per AOI: pre/post median S2 L2A (B08,B12,SCL), cloud-mask SCL, NBR, dNBR≥threshold
+    (default 0.27). Clip scars to seed buffered 300 m; drop parts < min-ha (default 1.0).
   - Batch jobs → GeoTIFF → local polygonize → scars/sentinel_{year}_{id}.geojson
     + combined scars/sentinel_{year}.geojson.
 
@@ -39,12 +41,15 @@ ROOT = Path(__file__).resolve().parents[1]
 SCARS_DIR = ROOT / "scars"
 TMP_DIR = ROOT / ".tmp" / "openeo"
 
-DNBR_THRESHOLD = 0.12
+DNBR_THRESHOLD = 0.27
 CDSE_URL = "https://openeo.dataspace.copernicus.eu"
-BUFFER_M = 2500.0  # ~2.5 km
-BUFFER_M_HUGE = 5000.0  # if seed area > 500 ha
-HUGE_HA = 500.0
+BUFFER_OFFICIAL_M = 800.0
+BUFFER_EFFIS_M = 1200.0
+HUGE_HA = 500.0  # seed area: buffer +50%
 MIN_POINT_HA = 5.0  # skip tiny point-only seeds
+MIN_PART_HA = 1.0  # drop polygonized parts smaller than this
+CLIP_SEED_BUFFER_M = 300.0  # clip scars to seed ⊕ this buffer
+EFFIS_OVERLAP_FRAC = 0.3  # skip EFFIS if ≥ this fraction overlaps official
 AREA_CRS = "EPSG:25831"  # Catalonia UTM 31N
 SCL_CLOUD = {3, 8, 9, 10}  # cloud shadow, cloud med/high, cirrus
 
@@ -52,11 +57,13 @@ SCL_CLOUD = {3, 8, 9, 10}  # cloud shadow, cloud med/high, cirrus
 @dataclass
 class Aoi:
     aoi_id: str
-    geometry: Any  # shapely geom in EPSG:4326
+    geometry: Any  # buffered search window, EPSG:4326
+    seed_geometry: Any  # unbuffered seed (union), EPSG:4326 — for clip
     area_ha: float
     fire_date: date | None
     source: str
     seed_year: int
+    buffer_m: float
 
 
 def _client_credentials() -> tuple[str, str] | None:
@@ -168,21 +175,74 @@ def _feature_id(props: dict, path: Path, idx: int) -> str:
     return f"{path.stem}_{idx}"
 
 
-def load_seed_geodataframes(year: int, aoi_path: Path | None):
+def _seed_path_ok(p: Path) -> bool:
+    return p.exists() and p.stat().st_size > 20
+
+
+def _buffer_m_for(source: str, area_ha: float) -> float:
+    base = BUFFER_OFFICIAL_M if source == "official" else BUFFER_EFFIS_M
+    if source == "aoi":
+        base = BUFFER_OFFICIAL_M
+    if area_ha >= HUGE_HA:
+        base = base * 1.5
+    return float(base)
+
+
+def _filter_effis_nonoverlapping(official_gdf, effis_gdf):
+    """Keep EFFIS features whose overlap with official is below EFFIS_OVERLAP_FRAC."""
+    if official_gdf is None or official_gdf.empty or effis_gdf.empty:
+        return effis_gdf
+    off_m = official_gdf.to_crs(AREA_CRS)
+    ef_m = effis_gdf.to_crs(AREA_CRS)
+    off_union = off_m.unary_union
+    keep_idx = []
+    for idx, geom in ef_m.geometry.items():
+        if geom is None or geom.is_empty:
+            continue
+        area = float(geom.area)
+        if area <= 0:
+            continue
+        inter = geom.intersection(off_union)
+        frac = float(inter.area) / area if inter and not inter.is_empty else 0.0
+        if frac < EFFIS_OVERLAP_FRAC:
+            keep_idx.append(idx)
+    if not keep_idx:
+        return effis_gdf.iloc[0:0].copy()
+    return effis_gdf.loc[keep_idx].copy()
+
+
+def load_seed_geodataframes(
+    year: int, aoi_path: Path | None, prefer_official: bool = True
+):
     import geopandas as gpd
 
     frames = []
     paths: list[Path] = []
+    n_official = 0
+    n_effis = 0
+    n_effis_skipped = 0
+
     if aoi_path is not None:
         paths = [aoi_path]
     else:
         for y in (year, year - 1):
-            for prefix in ("official", "effis"):
-                p = SCARS_DIR / f"{prefix}_{y}.geojson"
-                if p.exists() and p.stat().st_size > 20:
-                    # Prefer same-year; still collect year-1 if same-year empty later
-                    paths.append(p)
-        # Deduplicate while preserving order
+            official_p = SCARS_DIR / f"official_{y}.geojson"
+            effis_p = SCARS_DIR / f"effis_{y}.geojson"
+            has_official = _seed_path_ok(official_p)
+            has_effis = _seed_path_ok(effis_p)
+            if has_official:
+                paths.append(official_p)
+            if has_effis:
+                # Same-year: skip EFFIS entirely when official exists and prefer_official
+                if prefer_official and has_official and y == year:
+                    print(
+                        f"[map_scars_openeo] prefer-official: skipping {effis_p.name} "
+                        f"(official_{y} present)",
+                        flush=True,
+                    )
+                    n_effis_skipped += 1
+                else:
+                    paths.append(effis_p)
         seen = set()
         uniq = []
         for p in paths:
@@ -193,16 +253,17 @@ def load_seed_geodataframes(year: int, aoi_path: Path | None):
 
     same_year = [p for p in paths if f"_{year}." in p.name or f"_{year}_" in p.name]
     if same_year:
-        # Prefer same-year seeds when available
         paths = same_year
     elif year >= 2026:
-        # Seed from year-1 (and any explicit --aoi already in paths)
         print(
             f"[map_scars_openeo] No same-year seed for {year}; "
             f"using year-1 / available layers as geographic seeds "
             f"with {year} seasonal windows.",
             flush=True,
         )
+
+    loaded_by_key: dict[tuple[str, int], Any] = {}
+    pending: list[tuple[Path, Any]] = []
 
     for p in paths:
         if not p.exists():
@@ -221,20 +282,59 @@ def load_seed_geodataframes(year: int, aoi_path: Path | None):
         m = re.search(r"(official|effis)_(\d{4})", p.name)
         if m:
             seed_year = int(m.group(2))
+        source = (
+            "official"
+            if "official" in p.name.lower()
+            else ("effis" if "effis" in p.name.lower() else "aoi")
+        )
         gdf["_seed_path"] = p.name
         gdf["_seed_year"] = seed_year
-        gdf["_source"] = "official" if "official" in p.name.lower() else (
-            "effis" if "effis" in p.name.lower() else "aoi"
-        )
+        gdf["_source"] = source
+        pending.append((p, gdf))
+        loaded_by_key[(source, seed_year)] = gdf
+
+    for p, gdf in pending:
+        source = str(gdf["_source"].iloc[0])
+        seed_year = int(gdf["_seed_year"].iloc[0])
+        if source == "effis" and not prefer_official:
+            off = loaded_by_key.get(("official", seed_year))
+            before = len(gdf)
+            gdf = _filter_effis_nonoverlapping(off, gdf)
+            dropped = before - len(gdf)
+            if dropped:
+                print(
+                    f"[map_scars_openeo] dropped {dropped}/{before} EFFIS features "
+                    f"overlapping official_{seed_year}",
+                    flush=True,
+                )
+                n_effis_skipped += dropped
+        if gdf.empty:
+            continue
+        if source == "official":
+            n_official += len(gdf)
+        elif source == "effis":
+            n_effis += len(gdf)
         frames.append(gdf)
+
+    print(
+        f"[map_scars_openeo] seed sources: official={n_official} "
+        f"effis={n_effis} effis_skipped_overlap_or_prefer={n_effis_skipped} "
+        f"prefer_official={prefer_official}",
+        flush=True,
+    )
     return frames
 
 
-def build_aois(year: int, max_aois: int, aoi_path: Path | None) -> list[Aoi]:
+def build_aois(
+    year: int,
+    max_aois: int,
+    aoi_path: Path | None,
+    prefer_official: bool = True,
+) -> list[Aoi]:
     import geopandas as gpd
     from shapely.ops import unary_union
 
-    frames = load_seed_geodataframes(year, aoi_path)
+    frames = load_seed_geodataframes(year, aoi_path, prefer_official=prefer_official)
     if not frames:
         return []
 
@@ -258,7 +358,6 @@ def build_aois(year: int, max_aois: int, aoi_path: Path | None) -> list[Aoi]:
             for k in gdf.columns
             if k not in ("geometry", "_seed_path", "_seed_year", "_source")
         }
-        # Also pull from original index-aligned frame
         for k in ("DATA_INCEN", "FIREDATE", "FINALDATE", "CODI_FINAL", "id", "AREA_HA"):
             if k in row.index:
                 props[k] = row[k]
@@ -266,35 +365,37 @@ def build_aois(year: int, max_aois: int, aoi_path: Path | None) -> list[Aoi]:
         is_point = geom.geom_type in ("Point", "MultiPoint")
         area_ha = float(row["area_ha"])
         if is_point and area_ha < MIN_POINT_HA:
-            # points have ~0 area — skip unless we treat them specially
             print(f"  skip tiny point seed idx={idx}", flush=True)
             continue
         if (not is_point) and area_ha < 0.01:
             continue
 
-        buf = BUFFER_M_HUGE if area_ha >= HUGE_HA else BUFFER_M
+        src = str(row.get("_source", "aoi"))
+        buf = _buffer_m_for(src, area_ha)
         # Points: give a minimum footprint before buffer (~radius for ~5 ha disk ≈ 126 m)
         if is_point:
             geom = geom.buffer(126.0)
             area_ha = float(geom.area / 10_000.0)
             if area_ha < MIN_POINT_HA:
                 continue
+        seed_m = geom
         buffered = geom.buffer(buf)
         fire_d = parse_fire_date(props)
         # If seed is from prior year (2026 case), ignore old fire dates → seasonal defaults
         seed_year = int(row.get("_seed_year", year))
         if seed_year != year:
             fire_d = None
-        src = str(row.get("_source", "aoi"))
         fid = _feature_id(props, Path(str(row.get("_seed_path", "aoi"))), int(idx))
         aois_raw.append(
             {
                 "id": fid,
                 "geom_m": buffered,
+                "seed_m": seed_m,
                 "area_ha_seed": area_ha,
                 "fire_date": fire_d,
                 "source": src,
                 "seed_year": seed_year,
+                "buffer_m": buf,
             }
         )
 
@@ -306,10 +407,7 @@ def build_aois(year: int, max_aois: int, aoi_path: Path | None) -> list[Aoi]:
     merged = unary_union(geoms)
     parts = list(merged.geoms) if merged.geom_type == "MultiPolygon" else [merged]
 
-    # Assign metadata from largest overlapping seed
-    import geopandas as gpd2
-
-    seed_gdf = gpd2.GeoDataFrame(
+    seed_gdf = gpd.GeoDataFrame(
         [
             {
                 "id": a["id"],
@@ -317,6 +415,8 @@ def build_aois(year: int, max_aois: int, aoi_path: Path | None) -> list[Aoi]:
                 "fire_date": a["fire_date"],
                 "source": a["source"],
                 "seed_year": a["seed_year"],
+                "buffer_m": a["buffer_m"],
+                "seed_m": a["seed_m"],
                 "geometry": a["geom_m"],
             }
             for a in aois_raw
@@ -329,13 +429,14 @@ def build_aois(year: int, max_aois: int, aoi_path: Path | None) -> list[Aoi]:
         if part is None or part.is_empty:
             continue
         area_ha = float(part.area / 10_000.0)
-        # Find best overlapping seed for metadata
         overlaps = seed_gdf[seed_gdf.intersects(part)].copy()
         if overlaps.empty:
             fire_d = None
             src = "merged"
             fid = f"merged_{i}"
             seed_year = year
+            buf_m = BUFFER_OFFICIAL_M
+            seed_union_m = part  # fallback
         else:
             overlaps = overlaps.sort_values("area_ha_seed", ascending=False)
             top = overlaps.iloc[0]
@@ -343,16 +444,22 @@ def build_aois(year: int, max_aois: int, aoi_path: Path | None) -> list[Aoi]:
             src = str(top["source"])
             fid = str(top["id"])
             seed_year = int(top["seed_year"])
-        # Back to WGS84
-        g_wgs = gpd2.GeoSeries([part], crs=AREA_CRS).to_crs("EPSG:4326").iloc[0]
+            buf_m = float(top["buffer_m"])
+            seed_union_m = unary_union(list(overlaps["seed_m"]))
+        g_wgs = gpd.GeoSeries([part], crs=AREA_CRS).to_crs("EPSG:4326").iloc[0]
+        seed_wgs = (
+            gpd.GeoSeries([seed_union_m], crs=AREA_CRS).to_crs("EPSG:4326").iloc[0]
+        )
         result.append(
             Aoi(
                 aoi_id=fid,
                 geometry=g_wgs,
+                seed_geometry=seed_wgs,
                 area_ha=area_ha,
                 fire_date=fire_d,
                 source=src,
                 seed_year=seed_year,
+                buffer_m=buf_m,
             )
         )
 
@@ -432,8 +539,16 @@ def build_dnbr_cube(connection, extent: dict, pre: tuple[str, str], post: tuple[
     return nbr_pre - nbr_post
 
 
-def polygonize_tiff(tiff_path: Path, threshold: float = DNBR_THRESHOLD) -> list[dict]:
-    """Polygonize burned pixels (dNBR >= threshold) → GeoJSON-like features."""
+def polygonize_tiff(
+    tiff_path: Path,
+    threshold: float = DNBR_THRESHOLD,
+    min_ha: float = MIN_PART_HA,
+    clip_geom_wgs84=None,
+) -> list[dict]:
+    """Polygonize burned pixels (dNBR >= threshold) → GeoJSON-like features.
+
+    Drops parts < min_ha. Optionally clips to seed geometry buffered CLIP_SEED_BUFFER_M.
+    """
     import numpy as np
     import rasterio
     from rasterio import features as rio_features
@@ -468,17 +583,35 @@ def polygonize_tiff(tiff_path: Path, threshold: float = DNBR_THRESHOLD) -> list[
             return []
         merged = unary_union(geoms)
         parts = list(merged.geoms) if merged.geom_type.startswith("Multi") else [merged]
-        # Reproject to WGS84 if needed
         import geopandas as gpd
 
         gs = gpd.GeoSeries(parts, crs=crs)
         if crs is None:
             gs = gs.set_crs("EPSG:4326")
         gs = gs.to_crs("EPSG:4326")
+
+        if clip_geom_wgs84 is not None and not getattr(clip_geom_wgs84, "is_empty", True):
+            seed_m = (
+                gpd.GeoSeries([clip_geom_wgs84], crs="EPSG:4326")
+                .to_crs(AREA_CRS)
+                .iloc[0]
+            )
+            clip_m = seed_m.buffer(CLIP_SEED_BUFFER_M)
+            clip_wgs = (
+                gpd.GeoSeries([clip_m], crs=AREA_CRS).to_crs("EPSG:4326").iloc[0]
+            )
+            gs = gs.intersection(clip_wgs)
+            gs = gs[~gs.is_empty & gs.is_valid]
+
+        if gs.empty:
+            return []
+
         metric = gs.to_crs(AREA_CRS)
         for i, (g_wgs, g_m) in enumerate(zip(gs, metric)):
+            if g_wgs is None or g_wgs.is_empty:
+                continue
             area_ha = float(g_m.area / 10_000.0)
-            if area_ha < 0.1:
+            if area_ha < min_ha:
                 continue
             feats.append(
                 {
@@ -494,12 +627,20 @@ def polygonize_tiff(tiff_path: Path, threshold: float = DNBR_THRESHOLD) -> list[
     return feats
 
 
-def run_aoi_job(connection, aoi: Aoi, year: int, out_dir: Path, dry_run: bool) -> Path | None:
+def run_aoi_job(
+    connection,
+    aoi: Aoi,
+    year: int,
+    out_dir: Path,
+    dry_run: bool,
+    threshold: float = DNBR_THRESHOLD,
+    min_ha: float = MIN_PART_HA,
+) -> Path | None:
     pre, post = windows_for_fire(aoi.fire_date, year)
     extent = spatial_extent(aoi.geometry)
     print(
         f"  AOI {aoi.aoi_id}: area_buf≈{aoi.area_ha:.1f} ha source={aoi.source} "
-        f"fire_date={aoi.fire_date} pre={pre} post={post} "
+        f"buffer_m={aoi.buffer_m:.0f} fire_date={aoi.fire_date} pre={pre} post={post} "
         f"extent={extent}",
         flush=True,
     )
@@ -541,14 +682,24 @@ def run_aoi_job(connection, aoi: Aoi, year: int, out_dir: Path, dry_run: bool) -
             print(f"  WARNING: no GeoTIFF for AOI {aoi.aoi_id}", flush=True)
             return None
         tiff = max(tiffs, key=lambda p: p.stat().st_size)
-        print(f"  Polygonizing {tiff.name} ({tiff.stat().st_size} bytes) …", flush=True)
-        feats = polygonize_tiff(tiff, DNBR_THRESHOLD)
+        print(
+            f"  Polygonizing {tiff.name} ({tiff.stat().st_size} bytes) "
+            f"threshold={threshold} min_ha={min_ha} clip_seed+{CLIP_SEED_BUFFER_M:.0f}m …",
+            flush=True,
+        )
+        feats = polygonize_tiff(
+            tiff,
+            threshold=threshold,
+            min_ha=min_ha,
+            clip_geom_wgs84=aoi.seed_geometry,
+        )
         for f in feats:
             f["properties"]["fire_id"] = aoi.aoi_id
             f["properties"]["burn_year"] = year
             f["properties"]["source"] = "sentinel"
             f["properties"]["aoi_source"] = aoi.source
-            f["properties"]["dnbr_threshold"] = DNBR_THRESHOLD
+            f["properties"]["dnbr_threshold"] = threshold
+            f["properties"]["buffer_m"] = aoi.buffer_m
             if aoi.fire_date:
                 f["properties"]["fire_date"] = aoi.fire_date.isoformat()
         out = SCARS_DIR / f"sentinel_{year}_{aoi.aoi_id}.geojson"
@@ -590,6 +741,24 @@ def main() -> int:
     ap.add_argument("--year", type=int, default=date.today().year, help="Burn year (e.g. 2024|2026)")
     ap.add_argument("--max-aois", type=int, default=15, help="Cap AOIs (largest first); CI default 15")
     ap.add_argument("--aoi", type=Path, default=None, help="Optional GeoJSON AOI override")
+    ap.add_argument(
+        "--threshold",
+        type=float,
+        default=DNBR_THRESHOLD,
+        help=f"dNBR threshold (default {DNBR_THRESHOLD})",
+    )
+    ap.add_argument(
+        "--min-ha",
+        type=float,
+        default=MIN_PART_HA,
+        help=f"Drop polygonized parts smaller than this (default {MIN_PART_HA})",
+    )
+    ap.add_argument(
+        "--prefer-official",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Prefer official seeds; skip same-year EFFIS when official exists (default: true)",
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force-skip", action="store_true", help="Always skip (CI smoke)")
     args = ap.parse_args()
@@ -605,11 +774,16 @@ def main() -> int:
 
     print(
         f"[map_scars_openeo] year={args.year} max_aois={args.max_aois} "
-        f"threshold={DNBR_THRESHOLD} dry_run={args.dry_run}",
+        f"threshold={args.threshold} min_ha={args.min_ha} "
+        f"prefer_official={args.prefer_official} "
+        f"buffer_official_m={BUFFER_OFFICIAL_M} buffer_effis_m={BUFFER_EFFIS_M} "
+        f"clip_seed_buffer_m={CLIP_SEED_BUFFER_M} dry_run={args.dry_run}",
         flush=True,
     )
 
-    aois = build_aois(args.year, args.max_aois, args.aoi)
+    aois = build_aois(
+        args.year, args.max_aois, args.aoi, prefer_official=args.prefer_official
+    )
     if not aois:
         # Last resort: do NOT process all of Catalonia as one cube
         return skip(
@@ -620,7 +794,8 @@ def main() -> int:
     print(f"[map_scars_openeo] {len(aois)} AOIs queued:", flush=True)
     for a in aois:
         print(
-            f"  - {a.aoi_id}: ~{a.area_ha:.0f} ha buf, fire={a.fire_date}, src={a.source}",
+            f"  - {a.aoi_id}: ~{a.area_ha:.0f} ha buf, buffer_m={a.buffer_m:.0f}, "
+            f"fire={a.fire_date}, src={a.source}",
             flush=True,
         )
 
@@ -649,7 +824,15 @@ def main() -> int:
     written: list[Path] = []
     for i, aoi in enumerate(aois, 1):
         print(f"[{i}/{len(aois)}] Processing AOI {aoi.aoi_id} …", flush=True)
-        out = run_aoi_job(connection, aoi, args.year, TMP_DIR, dry_run=False)
+        out = run_aoi_job(
+            connection,
+            aoi,
+            args.year,
+            TMP_DIR,
+            dry_run=False,
+            threshold=args.threshold,
+            min_ha=args.min_ha,
+        )
         if out is not None:
             written.append(out)
 

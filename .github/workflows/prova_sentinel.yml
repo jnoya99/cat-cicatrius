@@ -71,8 +71,8 @@ jobs:
           CDSE_CLIENT_ID: ${{ secrets.CDSE_CLIENT_ID }}
           CDSE_CLIENT_SECRET: ${{ secrets.CDSE_CLIENT_SECRET }}
         run: |
-          echo "Running map_scars_openeo.py --year ${YEAR} --max-aois ${MAX_AOIS}"
-          python scripts/map_scars_openeo.py --year "${YEAR}" --max-aois "${MAX_AOIS}"
+          echo "Running map_scars_openeo.py --year ${YEAR} --max-aois ${MAX_AOIS} --threshold 0.27 --prefer-official"
+          python scripts/map_scars_openeo.py --year "${YEAR}" --max-aois "${MAX_AOIS}" --threshold 0.27 --prefer-official
 
       - name: Validate vs official (2024 only)
         if: env.YEAR == '2024'
