@@ -1,7 +1,29 @@
 {
   "year": 2024,
-  "status": "missing_sentinel",
-  "official": "/home/runner/work/cat-cicatrius/cat-cicatrius/scars/official_2024.geojson",
-  "sentinel": "/home/runner/work/cat-cicatrius/cat-cicatrius/scars/sentinel_2024.geojson",
-  "message": "No hi ha scars Sentinel per validar."
+  "status": "ok",
+  "grid": {
+    "step_deg": 0.001,
+    "min_lon": 0.15,
+    "min_lat": 40.42,
+    "nlon": 3271
+  },
+  "paths": {
+    "official": "scars/official_2024.geojson",
+    "sentinel": "scars/sentinel_2024.geojson"
+  },
+  "area_ha": {
+    "official": 1213.31,
+    "sentinel": 12010.13
+  },
+  "metrics": {
+    "n_cells_official": 2045,
+    "n_cells_sentinel": 40748,
+    "true_positives": 1193,
+    "false_positives": 39555,
+    "false_negatives": 852,
+    "iou": 0.0287,
+    "precision": 0.0293,
+    "recall": 0.5834,
+    "f1": 0.0558
+  }
 }
