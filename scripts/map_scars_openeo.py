@@ -16,12 +16,15 @@ Pipeline:
     (--prefer-official, default on); year-1 seeds when needed (e.g. 2026).
   - Buffer ~800 m (official) / ~1200 m (EFFIS); +50% if seed >500 ha; merge overlaps;
     skip tiny <~5 ha points; cap --max-aois.
-  - Per AOI: pre/post median S2 L2A (B08,B12,SCL), cloud-mask SCL, NBR, dNBR.
-    Region growing: core dNBR≥threshold_core (0.35) then grow contiguous
-    neighbours ≥threshold_grow (0.22). Optional light morph opening on core only.
-    Clip scars to seed buffered 300 m; drop parts < min-ha (default 1.0).
-    Forest/scrub filter: ESA WorldCover 2021 via CDSE openEO (classes 10 tree +
-    20 shrub); applied on GeoTIFF before polygonize. Excludes cropland/built/water/bare.
+  - Per AOI: pre median S2 L2A (B08,B12,SCL) over clear-sky pre window; post:
+    2–3 sequential post composites (default +7–30/+30–60/+60–90d after fire_date,
+    or seasonal slices); dNBR per window then per-pixel maximum dNBR (recovers
+    cloud-gapped burns). Region growing: core dNBR≥threshold_core (0.35) then
+    grow contiguous neighbours ≥threshold_grow (0.22). Optional light morph
+    opening on core only. Clip scars to seed buffered 300 m; drop parts < min-ha
+    (default 1.0). Forest/scrub filter: ESA WorldCover 2021 via CDSE openEO
+    (classes 10 tree + 20 shrub); applied on GeoTIFF before polygonize.
+    Excludes cropland/built/water/bare. CLI: --post-windows N (default 3).
   - Batch jobs → GeoTIFF → local polygonize → scars/sentinel_{year}_{id}.geojson
     + combined scars/sentinel_{year}.geojson.
 
@@ -133,30 +136,91 @@ def parse_fire_date(props: dict) -> date | None:
     return None
 
 
-def seasonal_windows(year: int) -> tuple[tuple[str, str], tuple[str, str]]:
-    """Default summer-fire windows when fire date unknown."""
-    pre = (f"{year}-04-01", f"{year}-06-15")
-    post = (f"{year}-08-15", f"{year}-10-15")
-    return pre, post
-
-
-def windows_for_fire(fire_date: date | None, year: int) -> tuple[tuple[str, str], tuple[str, str]]:
+def pre_window_for_fire(fire_date: date | None, year: int) -> tuple[str, str]:
+    """Clear-sky pre-fire median window (unchanged strategy)."""
     if fire_date is None:
-        return seasonal_windows(year)
-    # Clamp seasonally odd fires still into year windows with sensible offsets
+        return (f"{year}-04-01", f"{year}-06-15")
     pre_end = fire_date - timedelta(days=7)
     pre_start = fire_date - timedelta(days=75)
-    post_start = fire_date + timedelta(days=14)
-    post_end = fire_date + timedelta(days=60)
-    # Ensure chronological and year-bounded soft clamps
     if pre_start > pre_end:
         pre_start = pre_end - timedelta(days=45)
-    if post_start > post_end:
-        post_end = post_start + timedelta(days=30)
-    return (
-        (pre_start.isoformat(), pre_end.isoformat()),
-        (post_start.isoformat(), post_end.isoformat()),
+    return (pre_start.isoformat(), pre_end.isoformat())
+
+
+def _slice_range(start: date, end: date, n_windows: int) -> list[tuple[str, str]]:
+    """Split [start, end] into n contiguous date windows (inclusive ISO pairs)."""
+    n_windows = max(1, int(n_windows))
+    if end < start:
+        end = start + timedelta(days=14)
+    total_days = (end - start).days
+    if total_days < n_windows:
+        # Degenerate: repeat tiny windows rather than fail
+        return [(start.isoformat(), max(start, end).isoformat()) for _ in range(n_windows)]
+    windows: list[tuple[str, str]] = []
+    for i in range(n_windows):
+        a = start + timedelta(days=int(round(total_days * i / n_windows)))
+        if i + 1 == n_windows:
+            b = end
+        else:
+            b = start + timedelta(days=int(round(total_days * (i + 1) / n_windows)))
+        if b <= a:
+            b = a + timedelta(days=1)
+        windows.append((a.isoformat(), b.isoformat()))
+    return windows
+
+
+def post_windows_for_fire(
+    fire_date: date | None, year: int, n_windows: int = 3
+) -> list[tuple[str, str]]:
+    """Sequential post-fire composite windows for max-dNBR compositing.
+
+    With fire_date and n_windows==3 (preferred): +7–30d, +30–60d, +60–90d.
+    Otherwise: equal slices of +7d … +90d (or seasonal Aug15–Nov15 if unknown).
+    """
+    n_windows = max(1, int(n_windows))
+    if fire_date is None:
+        # Slightly longer seasonal span so late clear scenes can fill gaps
+        return _slice_range(date(year, 8, 15), date(year, 11, 15), n_windows)
+
+    if n_windows == 3:
+        specs = [(7, 30), (30, 60), (60, 90)]
+        out: list[tuple[str, str]] = []
+        for a_off, b_off in specs:
+            a = fire_date + timedelta(days=a_off)
+            b = fire_date + timedelta(days=b_off)
+            if b <= a:
+                b = a + timedelta(days=14)
+            out.append((a.isoformat(), b.isoformat()))
+        return out
+
+    if n_windows == 1:
+        # Legacy-ish single post window (slightly wider than old +14–60)
+        a = fire_date + timedelta(days=7)
+        b = fire_date + timedelta(days=60)
+        return [(a.isoformat(), b.isoformat())]
+
+    return _slice_range(
+        fire_date + timedelta(days=7),
+        fire_date + timedelta(days=90),
+        n_windows,
     )
+
+
+def windows_for_fire(
+    fire_date: date | None, year: int, n_post_windows: int = 3
+) -> tuple[tuple[str, str], list[tuple[str, str]]]:
+    """Return (pre_window, list_of_post_windows)."""
+    return (
+        pre_window_for_fire(fire_date, year),
+        post_windows_for_fire(fire_date, year, n_post_windows),
+    )
+
+
+def seasonal_windows(year: int) -> tuple[tuple[str, str], tuple[str, str]]:
+    """Back-compat: single pre + single post (first seasonal post slice)."""
+    pre = pre_window_for_fire(None, year)
+    posts = post_windows_for_fire(None, year, n_windows=1)
+    return pre, posts[0]
 
 
 def _feature_id(props: dict, path: Path, idx: int) -> str:
@@ -521,8 +585,20 @@ def connect_cdse():
         ) from e
 
 
-def build_dnbr_cube(connection, extent: dict, pre: tuple[str, str], post: tuple[str, str]):
-    """Build dNBR DataCube: median pre/post NBR with SCL cloud mask."""
+def build_dnbr_cube(
+    connection,
+    extent: dict,
+    pre: tuple[str, str],
+    post_windows: list[tuple[str, str]],
+):
+    """Build dNBR DataCube: median pre NBR vs multi-post max dNBR.
+
+    For each post window, median clear-sky NBR → dNBR = NBR_pre − NBR_post.
+    Per-pixel maximum across post windows recovers burns only visible in some
+    clear scenes (cloud gaps). Threshold applied locally when polygonizing.
+    """
+    if not post_windows:
+        raise ValueError("post_windows must be non-empty")
 
     def nbr_composite(temporal_extent: tuple[str, str]):
         cube = connection.load_collection(
@@ -542,9 +618,20 @@ def build_dnbr_cube(connection, extent: dict, pre: tuple[str, str], post: tuple[
         return nbr_masked.reduce_dimension(reducer="median", dimension="t")
 
     nbr_pre = nbr_composite(pre)
-    nbr_post = nbr_composite(post)
-    # Float dNBR; threshold applied locally when polygonizing
-    return nbr_pre - nbr_post
+    dnbr_max = None
+    for i, post in enumerate(post_windows):
+        nbr_post = nbr_composite(post)
+        dnbr_i = nbr_pre - nbr_post
+        if dnbr_max is None:
+            dnbr_max = dnbr_i
+        else:
+            # Per-pixel max: burn signal when any clear post composite shows it
+            dnbr_max = dnbr_max.merge_cubes(dnbr_i, overlap_resolver="max")
+        print(
+            f"    post window [{i + 1}/{len(post_windows)}]: {post[0]} → {post[1]}",
+            flush=True,
+        )
+    return dnbr_max
 
 
 
@@ -850,19 +937,21 @@ def run_aoi_job(
     min_ha: float = MIN_PART_HA,
     forest_mask: bool = True,
     morph_core: bool = True,
+    post_windows: int = 3,
 ) -> Path | None:
-    pre, post = windows_for_fire(aoi.fire_date, year)
+    pre, posts = windows_for_fire(aoi.fire_date, year, n_post_windows=post_windows)
     extent = spatial_extent(aoi.geometry)
+    posts_str = "; ".join(f"{a}→{b}" for a, b in posts)
     print(
         f"  AOI {aoi.aoi_id}: area_buf≈{aoi.area_ha:.1f} ha source={aoi.source} "
-        f"buffer_m={aoi.buffer_m:.0f} fire_date={aoi.fire_date} pre={pre} post={post} "
-        f"extent={extent}",
+        f"buffer_m={aoi.buffer_m:.0f} fire_date={aoi.fire_date} pre={pre} "
+        f"post_windows({len(posts)})=[{posts_str}] extent={extent}",
         flush=True,
     )
     if dry_run:
         return None
 
-    cube = build_dnbr_cube(connection, extent, pre, post)
+    cube = build_dnbr_cube(connection, extent, pre, posts)
     title = f"cat-cicatrius dNBR {year} {aoi.aoi_id}"
     job = None
     job_id = None
@@ -939,6 +1028,11 @@ def run_aoi_job(
             f["properties"]["dnbr_threshold_grow"] = threshold_grow
             f["properties"]["dnbr_threshold"] = threshold_core  # compat
             f["properties"]["buffer_m"] = aoi.buffer_m
+            f["properties"]["post_windows"] = len(posts)
+            f["properties"]["post_window_dates"] = [
+                {"start": a, "end": b} for a, b in posts
+            ]
+            f["properties"]["pre_window"] = {"start": pre[0], "end": pre[1]}
             if aoi.fire_date:
                 f["properties"]["fire_date"] = aoi.fire_date.isoformat()
         out = SCARS_DIR / f"sentinel_{year}_{aoi.aoi_id}.geojson"
@@ -1023,6 +1117,13 @@ def main() -> int:
         default=True,
         help="Light 1px morphological opening on core before grow (default: true)",
     )
+    ap.add_argument(
+        "--post-windows",
+        type=int,
+        default=3,
+        help="Number of sequential post-fire composites; per-pixel max dNBR "
+        "(default 3: +7–30/+30–60/+60–90d after fire_date, or seasonal slices)",
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force-skip", action="store_true", help="Always skip (CI smoke)")
     args = ap.parse_args()
@@ -1059,22 +1160,25 @@ def main() -> int:
     except ImportError as e:
         return skip(f"geometry deps missing: {e}")
 
+    n_post = max(1, int(args.post_windows))
     print(
         f"[map_scars_openeo] year={args.year} max_aois={args.max_aois} "
         f"threshold_core={threshold_core} threshold_grow={threshold_grow} "
         f"min_ha={args.min_ha} prefer_official={args.prefer_official} "
         f"forest_mask={args.forest_mask} morph_core={args.morph_core} "
+        f"post_windows={n_post} "
         f"buffer_official_m={BUFFER_OFFICIAL_M} buffer_effis_m={BUFFER_EFFIS_M} "
         f"clip_seed_buffer_m={CLIP_SEED_BUFFER_M} dry_run={args.dry_run}",
         flush=True,
     )
     print(
-        "[map_scars_openeo] region-grow + forest settings: "
+        "[map_scars_openeo] region-grow + forest + multi-post settings: "
         f"core≥{threshold_core} grow≥{threshold_grow}, "
         f"clip_seed_buffer_m={CLIP_SEED_BUFFER_M}, "
         f"search_buffer_official_m={BUFFER_OFFICIAL_M}, "
         f"search_buffer_effis_m={BUFFER_EFFIS_M}, "
         f"min_ha={args.min_ha}, morph_core={args.morph_core}, "
+        f"post_windows={n_post} (per-pixel max dNBR across post composites), "
         f"forest_mask={args.forest_mask} ({WORLDCOVER_COLLECTION} classes "
         f"{sorted(WORLDCOVER_FOREST_SCRUB)})",
         flush=True,
@@ -1092,9 +1196,12 @@ def main() -> int:
 
     print(f"[map_scars_openeo] {len(aois)} AOIs queued:", flush=True)
     for a in aois:
+        pre_w, post_w = windows_for_fire(a.fire_date, args.year, n_post_windows=n_post)
+        posts_str = ", ".join(f"{x}→{y}" for x, y in post_w)
         print(
             f"  - {a.aoi_id}: ~{a.area_ha:.0f} ha buf, buffer_m={a.buffer_m:.0f}, "
-            f"fire={a.fire_date}, src={a.source}",
+            f"fire={a.fire_date}, src={a.source}, pre={pre_w[0]}→{pre_w[1]}, "
+            f"posts=[{posts_str}]",
             flush=True,
         )
 
@@ -1134,6 +1241,7 @@ def main() -> int:
             min_ha=args.min_ha,
             forest_mask=args.forest_mask,
             morph_core=args.morph_core,
+            post_windows=n_post,
         )
         if out is not None:
             written.append(out)
