@@ -71,8 +71,16 @@ jobs:
           CDSE_CLIENT_ID: ${{ secrets.CDSE_CLIENT_ID }}
           CDSE_CLIENT_SECRET: ${{ secrets.CDSE_CLIENT_SECRET }}
         run: |
-          echo "Running map_scars_openeo.py --year ${YEAR} --max-aois ${MAX_AOIS} --threshold 0.35 --prefer-official"
-          python scripts/map_scars_openeo.py --year "${YEAR}" --max-aois "${MAX_AOIS}" --threshold 0.35 --prefer-official
+          echo "Running map_scars_openeo.py --year ${YEAR} --max-aois ${MAX_AOIS} --threshold-core 0.35 --threshold-grow 0.22 --prefer-official --forest-mask"
+          python scripts/map_scars_openeo.py \
+            --year "${YEAR}" \
+            --max-aois "${MAX_AOIS}" \
+            --threshold-core 0.35 \
+            --threshold-grow 0.22 \
+            --min-ha 1.0 \
+            --prefer-official \
+            --forest-mask \
+            --morph-core
 
       - name: Validate vs official (2024 only)
         if: env.YEAR == '2024'
@@ -106,13 +114,15 @@ jobs:
             echo "No scars to commit"
           else
             git commit -m "data: scars sentinel ${YEAR} (max_aois=${MAX_AOIS}) [skip ci]"
-            # fetch_official/effis may leave unstaged dirt that blocks rebase
+            # fetch_official/effis leave unstaged/untracked dirt that blocks rebase
             git stash push -u -m "prova-sentinel-pre-rebase" || true
             for i in 1 2 3 4 5; do
               git fetch origin main
+              # Re-stash any dirt that reappeared (e.g. after conflict checkout)
+              git stash push -u -m "prova-sentinel-rebase-attempt-$i" || true
               if git rebase origin/main; then
                 git push origin HEAD:main
-                git stash pop || true
+                git stash clear || true
                 exit 0
               fi
               echo "Rebase conflict on attempt $i — keep our year scars, drop conflicting docs"
@@ -123,7 +133,7 @@ jobs:
               GIT_EDITOR=true git rebase --continue || git rebase --abort || true
               sleep $((i * 3))
             done
-            git stash pop || true
+            git stash clear || true
             echo "Failed to push scars after retries" >&2
             exit 1
           fi
@@ -147,13 +157,14 @@ jobs:
             exit 0
           fi
           git commit -m "data: docs after sentinel ${YEAR} [skip ci]"
-          # fetch_official/effis may leave unstaged dirt that blocks rebase
+          # fetch_official/effis leave unstaged/untracked dirt that blocks rebase
           git stash push -u -m "prova-sentinel-docs-pre-rebase" || true
           for i in 1 2 3 4 5; do
             git fetch origin main
+            git stash push -u -m "prova-sentinel-docs-rebase-attempt-$i" || true
             if git rebase origin/main; then
               git push origin HEAD:main
-              git stash pop || true
+              git stash clear || true
               exit 0
             fi
             # Binary docs: keep the just-rebuilt copy
@@ -162,7 +173,7 @@ jobs:
             GIT_EDITOR=true git rebase --continue || git rebase --abort || true
             sleep $((i * 3))
           done
-          git stash pop || true
+          git stash clear || true
           echo "Failed to push docs after retries" >&2
           exit 1
 

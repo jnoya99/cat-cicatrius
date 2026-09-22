@@ -14,11 +14,14 @@ openEO automation.
 Pipeline:
   - Prefer scars/official_{year}.geojson seeds over EFFIS when present
     (--prefer-official, default on); year-1 seeds when needed (e.g. 2026).
-  - Buffer ~500 m (official) / ~800 m (EFFIS); +50% if seed >500 ha; merge overlaps;
+  - Buffer ~800 m (official) / ~1200 m (EFFIS); +50% if seed >500 ha; merge overlaps;
     skip tiny <~5 ha points; cap --max-aois.
-  - Per AOI: pre/post median S2 L2A (B08,B12,SCL), cloud-mask SCL, NBR, dNBR≥threshold
-    (default 0.35). Clip scars to seed buffered 150 m; drop parts < min-ha (default 2.0).
-    Morphological opening (1px erode+dilate) before polygonize to kill FP speckles.
+  - Per AOI: pre/post median S2 L2A (B08,B12,SCL), cloud-mask SCL, NBR, dNBR.
+    Region growing: core dNBR≥threshold_core (0.35) then grow contiguous
+    neighbours ≥threshold_grow (0.22). Optional light morph opening on core only.
+    Clip scars to seed buffered 300 m; drop parts < min-ha (default 1.0).
+    Forest/scrub filter: ESA WorldCover 2021 via CDSE openEO (classes 10 tree +
+    20 shrub); applied on GeoTIFF before polygonize. Excludes cropland/built/water/bare.
   - Batch jobs → GeoTIFF → local polygonize → scars/sentinel_{year}_{id}.geojson
     + combined scars/sentinel_{year}.geojson.
 
@@ -42,17 +45,21 @@ ROOT = Path(__file__).resolve().parents[1]
 SCARS_DIR = ROOT / "scars"
 TMP_DIR = ROOT / ".tmp" / "openeo"
 
-DNBR_THRESHOLD = 0.35
+DNBR_THRESHOLD_CORE = 0.35
+DNBR_THRESHOLD_GROW = 0.22
+DNBR_THRESHOLD = DNBR_THRESHOLD_CORE  # backwards-compat alias
 CDSE_URL = "https://openeo.dataspace.copernicus.eu"
-BUFFER_OFFICIAL_M = 500.0
-BUFFER_EFFIS_M = 800.0
+BUFFER_OFFICIAL_M = 800.0
+BUFFER_EFFIS_M = 1200.0
 HUGE_HA = 500.0  # seed area: buffer +50%
 MIN_POINT_HA = 5.0  # skip tiny point-only seeds
-MIN_PART_HA = 2.0  # drop polygonized parts smaller than this
-CLIP_SEED_BUFFER_M = 150.0  # clip scars to seed ⊕ this buffer
+MIN_PART_HA = 1.0  # drop polygonized parts smaller than this
+CLIP_SEED_BUFFER_M = 300.0  # clip scars to seed ⊕ this buffer
 EFFIS_OVERLAP_FRAC = 0.3  # skip EFFIS if ≥ this fraction overlaps official
 AREA_CRS = "EPSG:25831"  # Catalonia UTM 31N
 SCL_CLOUD = {3, 8, 9, 10}  # cloud shadow, cloud med/high, cirrus
+WORLDCOVER_COLLECTION = "ESA_WORLDCOVER_10M_2021_V2"
+WORLDCOVER_FOREST_SCRUB = {10, 20}  # tree cover, shrubland
 
 
 @dataclass
@@ -586,16 +593,150 @@ def morphological_opening(mask, iterations: int = 1):
     return _binary_dilate(_binary_erode(mask, iterations), iterations)
 
 
+def region_grow_mask(data, threshold_core: float, threshold_grow: float, morph_core: bool = True):
+    """Core (dNBR≥core) then keep connected components of (dNBR≥grow) that touch core.
+
+    Morphological opening (1px) is applied to the core only when morph_core=True,
+    before growing — light anti-speckle without killing thin burned corridors.
+    """
+    import numpy as np
+
+    finite = np.isfinite(data)
+    core = finite & (data >= threshold_core)
+    grow = finite & (data >= threshold_grow)
+    if morph_core and core.any():
+        n0 = int(core.sum())
+        core = morphological_opening(core, iterations=1)
+        print(
+            f"    morph opening 1px (core only): {n0} → {int(core.sum())}",
+            flush=True,
+        )
+    if not core.any():
+        return core
+    if not grow.any():
+        return core
+
+    try:
+        from scipy import ndimage
+
+        labeled, _n = ndimage.label(grow)
+        keep_labels = set(int(x) for x in np.unique(labeled[core]) if x != 0)
+        out = np.isin(labeled, list(keep_labels)) if keep_labels else core.copy()
+    except ImportError:
+        # Iterative neighbour grow without scipy
+        out = core.copy()
+        changed = True
+        while changed:
+            dilated = _binary_dilate(out, iterations=1)
+            add = dilated & grow & ~out
+            changed = bool(add.any())
+            out = out | add
+    n_core = int(core.sum())
+    n_out = int(out.sum())
+    print(
+        f"    region grow: core={n_core} → grown={n_out} "
+        f"(core≥{threshold_core}, grow≥{threshold_grow})",
+        flush=True,
+    )
+    return out
+
+
+def download_worldcover_tiff(connection, extent: dict, out_path: Path) -> Path | None:
+    """Download ESA WorldCover 2021 MAP for extent via CDSE openEO (same auth)."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        cube = connection.load_collection(
+            WORLDCOVER_COLLECTION,
+            spatial_extent=extent,
+            temporal_extent=["2021-01-01", "2021-12-31"],
+            bands=["MAP"],
+        )
+        # Single-date collection; reduce_t if present
+        try:
+            cube = cube.reduce_dimension(reducer="first", dimension="t")
+        except Exception:
+            try:
+                cube = cube.max_time()
+            except Exception:
+                pass
+        print(
+            f"  Downloading {WORLDCOVER_COLLECTION} forest/scrub mask → {out_path.name} …",
+            flush=True,
+        )
+        try:
+            cube.download(str(out_path), format="GTiff")
+        except TypeError:
+            cube.download(str(out_path))
+        except Exception:
+            # Batch fallback
+            work = out_path.parent / f"wc_{out_path.stem}"
+            work.mkdir(parents=True, exist_ok=True)
+            job = cube.execute_batch(
+                outputfile=str(work / "worldcover.tif"),
+                out_format="GTiff",
+                title=f"cat-cicatrius WorldCover {out_path.stem}",
+            )
+            tiffs = list(work.glob("*.tif")) + list(work.rglob("*.tif"))
+            if not tiffs:
+                return None
+            src = max(tiffs, key=lambda q: q.stat().st_size)
+            import shutil
+
+            shutil.copy(src, out_path)
+        if out_path.exists() and out_path.stat().st_size > 100:
+            return out_path
+    except Exception as e:
+        print(
+            f"  WARNING: WorldCover download failed ({type(e).__name__}: {e}); "
+            "continuing without forest/scrub mask",
+            flush=True,
+        )
+    return None
+
+
+def apply_forest_scrub_mask(burn_mask, dnbr_transform, dnbr_crs, dnbr_shape, wc_path: Path):
+    """Keep burned pixels only on WorldCover tree (10) + shrubland (20)."""
+    import numpy as np
+    import rasterio
+    from rasterio.warp import reproject, Resampling
+
+    with rasterio.open(wc_path) as wc:
+        dest = np.zeros(dnbr_shape, dtype=np.uint8)
+        reproject(
+            source=rasterio.band(wc, 1),
+            destination=dest,
+            src_transform=wc.transform,
+            src_crs=wc.crs,
+            dst_transform=dnbr_transform,
+            dst_crs=dnbr_crs,
+            resampling=Resampling.nearest,
+        )
+    forest = np.isin(dest, list(WORLDCOVER_FOREST_SCRUB))
+    n_before = int(burn_mask.sum())
+    out = burn_mask & forest
+    n_after = int(out.sum())
+    print(
+        f"    forest/scrub mask (WorldCover 10+20): burned pixels {n_before} → {n_after} "
+        f"(removed {n_before - n_after})",
+        flush=True,
+    )
+    return out
+
+
 def polygonize_tiff(
     tiff_path: Path,
-    threshold: float = DNBR_THRESHOLD,
+    threshold_core: float = DNBR_THRESHOLD_CORE,
+    threshold_grow: float = DNBR_THRESHOLD_GROW,
     min_ha: float = MIN_PART_HA,
     clip_geom_wgs84=None,
+    worldcover_path: Path | None = None,
+    morph_core: bool = True,
 ) -> list[dict]:
-    """Polygonize burned pixels (dNBR >= threshold) → GeoJSON-like features.
+    """Polygonize burned pixels via region growing → GeoJSON-like features.
 
-    Applies 1px morphological opening before polygonize (anti-FP speckles).
-    Drops parts < min_ha. Optionally clips to seed geometry buffered CLIP_SEED_BUFFER_M.
+    Core: dNBR ≥ threshold_core; grow contiguous ≥ threshold_grow.
+    Optional WorldCover forest/scrub mask. Optional morph opening on core only.
+    Drops parts < min_ha. Optionally clips to seed ⊕ CLIP_SEED_BUFFER_M.
     """
     import numpy as np
     import rasterio
@@ -609,21 +750,30 @@ def polygonize_tiff(
         transform = src.transform
         crs = src.crs
         nodata = src.nodata
-        mask = np.isfinite(data) & (data >= threshold)
         if nodata is not None:
-            mask &= data != nodata
-        if not mask.any():
-            return []
-        n_before = int(mask.sum())
-        mask = morphological_opening(mask, iterations=1)
-        n_after = int(mask.sum())
-        print(
-            f"    morph opening 1px: burned pixels {n_before} → {n_after} "
-            f"(removed {n_before - n_after})",
-            flush=True,
+            data = np.where(data == nodata, np.nan, data.astype("float64"))
+        else:
+            data = data.astype("float64")
+
+        mask = region_grow_mask(
+            data, threshold_core, threshold_grow, morph_core=morph_core
         )
         if not mask.any():
             return []
+
+        if worldcover_path is not None and worldcover_path.exists():
+            try:
+                mask = apply_forest_scrub_mask(
+                    mask, transform, crs, data.shape, worldcover_path
+                )
+            except Exception as e:
+                print(
+                    f"    WARNING: forest mask apply failed ({type(e).__name__}: {e})",
+                    flush=True,
+                )
+        if not mask.any():
+            return []
+
         shapes_gen = rio_features.shapes(
             data.astype("float32"),
             mask=mask.astype("uint8"),
@@ -677,7 +827,11 @@ def polygonize_tiff(
                     "geometry": mapping(g_wgs),
                     "properties": {
                         "area_ha": round(area_ha, 3),
-                        "dnbr_threshold": threshold,
+                        "dnbr_threshold_core": threshold_core,
+                        "dnbr_threshold_grow": threshold_grow,
+                        "forest_mask": "esa_worldcover_2021_10_20"
+                        if worldcover_path
+                        else None,
                         "part": i,
                     },
                 }
@@ -691,8 +845,11 @@ def run_aoi_job(
     year: int,
     out_dir: Path,
     dry_run: bool,
-    threshold: float = DNBR_THRESHOLD,
+    threshold_core: float = DNBR_THRESHOLD_CORE,
+    threshold_grow: float = DNBR_THRESHOLD_GROW,
     min_ha: float = MIN_PART_HA,
+    forest_mask: bool = True,
+    morph_core: bool = True,
 ) -> Path | None:
     pre, post = windows_for_fire(aoi.fire_date, year)
     extent = spatial_extent(aoi.geometry)
@@ -732,31 +889,55 @@ def run_aoi_job(
             results.download_files(str(work))
         if job_id:
             print(f"  Job finished id={job_id}", flush=True)
-        tiffs = list(work.glob("*.tif")) + list(work.glob("*.tiff"))
-        if not tiffs:
-            # sometimes nested
-            tiffs = list(work.rglob("*.tif")) + list(work.rglob("*.tiff"))
+        tiffs = [
+            q
+            for q in (list(work.glob("*.tif")) + list(work.glob("*.tiff"))
+                      + list(work.rglob("*.tif")) + list(work.rglob("*.tiff")))
+            if "worldcover" not in q.name.lower()
+        ]
+        # de-dupe paths
+        seen = set()
+        uniq = []
+        for q in tiffs:
+            r = q.resolve()
+            if r not in seen:
+                seen.add(r)
+                uniq.append(q)
+        tiffs = uniq
         if not tiffs:
             print(f"  WARNING: no GeoTIFF for AOI {aoi.aoi_id}", flush=True)
             return None
-        tiff = max(tiffs, key=lambda p: p.stat().st_size)
+        preferred = [q for q in tiffs if q.name.lower().startswith("dnbr")]
+        tiff = max(preferred or tiffs, key=lambda q: q.stat().st_size)
+        wc_path = None
+        if forest_mask:
+            wc_path = download_worldcover_tiff(
+                connection, extent, work / "worldcover.tif"
+            )
         print(
             f"  Polygonizing {tiff.name} ({tiff.stat().st_size} bytes) "
-            f"threshold={threshold} min_ha={min_ha} clip_seed+{CLIP_SEED_BUFFER_M:.0f}m …",
+            f"core={threshold_core} grow={threshold_grow} min_ha={min_ha} "
+            f"clip_seed+{CLIP_SEED_BUFFER_M:.0f}m "
+            f"forest_mask={'yes' if wc_path else 'no'} …",
             flush=True,
         )
         feats = polygonize_tiff(
             tiff,
-            threshold=threshold,
+            threshold_core=threshold_core,
+            threshold_grow=threshold_grow,
             min_ha=min_ha,
             clip_geom_wgs84=aoi.seed_geometry,
+            worldcover_path=wc_path,
+            morph_core=morph_core,
         )
         for f in feats:
             f["properties"]["fire_id"] = aoi.aoi_id
             f["properties"]["burn_year"] = year
             f["properties"]["source"] = "sentinel"
             f["properties"]["aoi_source"] = aoi.source
-            f["properties"]["dnbr_threshold"] = threshold
+            f["properties"]["dnbr_threshold_core"] = threshold_core
+            f["properties"]["dnbr_threshold_grow"] = threshold_grow
+            f["properties"]["dnbr_threshold"] = threshold_core  # compat
             f["properties"]["buffer_m"] = aoi.buffer_m
             if aoi.fire_date:
                 f["properties"]["fire_date"] = aoi.fire_date.isoformat()
@@ -800,10 +981,23 @@ def main() -> int:
     ap.add_argument("--max-aois", type=int, default=15, help="Cap AOIs (largest first); CI default 15")
     ap.add_argument("--aoi", type=Path, default=None, help="Optional GeoJSON AOI override")
     ap.add_argument(
+        "--threshold-core",
+        type=float,
+        default=None,
+        help=f"dNBR core threshold for region growing (default {DNBR_THRESHOLD_CORE})",
+    )
+    ap.add_argument(
+        "--threshold-grow",
+        type=float,
+        default=None,
+        help=f"dNBR grow threshold contiguous to core (default {DNBR_THRESHOLD_GROW})",
+    )
+    ap.add_argument(
         "--threshold",
         type=float,
-        default=DNBR_THRESHOLD,
-        help=f"dNBR threshold (default {DNBR_THRESHOLD})",
+        default=None,
+        help="Alias: sets both --threshold-core and --threshold-grow to this value "
+        f"(legacy single-threshold mode). Default core={DNBR_THRESHOLD_CORE} grow={DNBR_THRESHOLD_GROW}",
     )
     ap.add_argument(
         "--min-ha",
@@ -817,9 +1011,44 @@ def main() -> int:
         default=True,
         help="Prefer official seeds; skip same-year EFFIS when official exists (default: true)",
     )
+    ap.add_argument(
+        "--forest-mask",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Mask burned pixels to ESA WorldCover tree+shrub (10,20) via CDSE openEO (default: true)",
+    )
+    ap.add_argument(
+        "--morph-core",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Light 1px morphological opening on core before grow (default: true)",
+    )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force-skip", action="store_true", help="Always skip (CI smoke)")
     args = ap.parse_args()
+
+    # Resolve thresholds: --threshold sets both; else core/grow defaults
+    if args.threshold is not None:
+        threshold_core = float(args.threshold)
+        threshold_grow = float(args.threshold)
+    else:
+        threshold_core = (
+            float(args.threshold_core)
+            if args.threshold_core is not None
+            else DNBR_THRESHOLD_CORE
+        )
+        threshold_grow = (
+            float(args.threshold_grow)
+            if args.threshold_grow is not None
+            else DNBR_THRESHOLD_GROW
+        )
+    if threshold_grow > threshold_core:
+        print(
+            f"[map_scars_openeo] WARNING: grow ({threshold_grow}) > core ({threshold_core}); "
+            "swapping",
+            flush=True,
+        )
+        threshold_core, threshold_grow = threshold_grow, threshold_core
 
     if args.force_skip:
         return skip("--force-skip")
@@ -832,20 +1061,22 @@ def main() -> int:
 
     print(
         f"[map_scars_openeo] year={args.year} max_aois={args.max_aois} "
-        f"threshold={args.threshold} min_ha={args.min_ha} "
-        f"prefer_official={args.prefer_official} "
+        f"threshold_core={threshold_core} threshold_grow={threshold_grow} "
+        f"min_ha={args.min_ha} prefer_official={args.prefer_official} "
+        f"forest_mask={args.forest_mask} morph_core={args.morph_core} "
         f"buffer_official_m={BUFFER_OFFICIAL_M} buffer_effis_m={BUFFER_EFFIS_M} "
         f"clip_seed_buffer_m={CLIP_SEED_BUFFER_M} dry_run={args.dry_run}",
         flush=True,
     )
     print(
-        "[map_scars_openeo] anti-FP settings: "
-        f"dnbr_threshold={args.threshold} (default {DNBR_THRESHOLD}), "
+        "[map_scars_openeo] region-grow + forest settings: "
+        f"core≥{threshold_core} grow≥{threshold_grow}, "
         f"clip_seed_buffer_m={CLIP_SEED_BUFFER_M}, "
         f"search_buffer_official_m={BUFFER_OFFICIAL_M}, "
         f"search_buffer_effis_m={BUFFER_EFFIS_M}, "
-        f"min_ha={args.min_ha} (default {MIN_PART_HA}), "
-        "morph_opening=1px erode+dilate",
+        f"min_ha={args.min_ha}, morph_core={args.morph_core}, "
+        f"forest_mask={args.forest_mask} ({WORLDCOVER_COLLECTION} classes "
+        f"{sorted(WORLDCOVER_FOREST_SCRUB)})",
         flush=True,
     )
 
@@ -898,8 +1129,11 @@ def main() -> int:
             args.year,
             TMP_DIR,
             dry_run=False,
-            threshold=args.threshold,
+            threshold_core=threshold_core,
+            threshold_grow=threshold_grow,
             min_ha=args.min_ha,
+            forest_mask=args.forest_mask,
+            morph_core=args.morph_core,
         )
         if out is not None:
             written.append(out)

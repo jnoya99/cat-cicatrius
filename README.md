@@ -8,10 +8,10 @@ Parcel·les cremades alineades a la **malla de l’app** (WGS84, pas **0.001°**
 Els bolets de primavera (p. ex. múrgoles) reaccionen a cicatrius de l’estiu **amb mesos de retard**. No cal un cron diari de hotspots:
 
 1. **Localitzar incendis** de tant en tant (taules Gencat + perímetres Bombers quan calgui).
-2. **Geometria** (prioritat):
-   - (a) SHP oficial DARPA/ICGC quan es publica;
-   - (b) si no, Sentinel-2 pre/post **dNBR** via CDSE/openEO;
-   - (c) EFFIS WFS opcional per a incendis grans;
+2. **Geometria** (prioritat **per any**):
+   - (a) SHP oficial DARPA/ICGC quan `scars/official_{year}.geojson` existeix → cel·les d’aquell any **principalment oficials**;
+   - (b) Sentinel-2 pre/post **dNBR** (region growing + màscara bosc/matoll) només omple anys/àrees **sense** cobertura oficial (no sobreescriu cel·les oficials);
+   - (c) EFFIS WFS opcional quan no hi ha oficial de l’any;
    - evitar buffers minúsculs.
 3. **Publicar 1–2 cops** abans de la temporada de múrgoles (p. ex. **1 nov** i **1 feb** Europe/Madrid).
 
@@ -46,9 +46,9 @@ dense_index = jj * NLON + ii
 | `scripts/ingest_gencat.py` | Taules Socrata → `events/*.csv` |
 | `scripts/fetch_official_shp.py` | Baixa `incendis{YY}.zip` de gencat.cat → GeoJSON a `scars/` |
 | `scripts/fetch_effis.py` | WFS EFFIS bbox Catalunya (best-effort) |
-| `scripts/map_scars_openeo.py` | CDSE openEO Sentinel-2 dNBR per AOI (salta si no hi ha secrets) |
+| `scripts/map_scars_openeo.py` | CDSE openEO Sentinel-2 dNBR per AOI: region growing (core 0.35 / grow 0.22) + filtre bosc/matoll ESA WorldCover 2021 (classes 10+20); salta si no hi ha secrets |
 | `scripts/validate_against_official.py` | IoU/P/R/F1 Sentinel vs oficial (malla 0.001°) |
-| `scripts/build_burned_cells.py` | Polígons → cel·les 0.001° → `docs/burned_cells.parquet` |
+| `scripts/build_burned_cells.py` | Polígons → cel·les 0.001° → `docs/burned_cells.parquet` (oficial primer per any; sentinel només omple forats) |
 | `scripts/publish_docs.py` | Manifest + checksums a `docs/manifest.json` |
 | **GitHub Pages / raw / jsDelivr** | Consumeix `docs/` |
 
@@ -156,6 +156,22 @@ scripts/                # pipeline
 
 Codi: MIT (vegeu `LICENSE`). Les dades respecten la llicència de cada proveïdor.
 
+## Sentinel dNBR (region growing + bosc/matoll)
+
+`map_scars_openeo.py` ja no usa un sol llindar binari:
+
+| Paràmetre | Defecte | Notes |
+|---|---|---|
+| `--threshold-core` | `0.35` | Nucli cremat segur |
+| `--threshold-grow` | `0.22` | Expansió només contiguous al nucli |
+| `--threshold` | — | Alias legacy: posa core i grow al mateix valor |
+| `--min-ha` | `1.0` | Descarta fragments petits |
+| Buffers cerca | 800 m oficial / 1200 m EFFIS | Clip a llavor ⊕ 300 m |
+| `--forest-mask` | on | ESA WorldCover 2021 via CDSE openEO (`ESA_WORLDCOVER_10M_2021_V2`); classes **10** (arbres) i **20** (matoll); exclou conreu, urbà, aigua, nues |
+| `--morph-core` | on | Opening 1px només al nucli (abans de créixer) |
+
+El producte `build_burned_cells.py` priorita `official_{year}`: si existeix, les cel·les d’aquell any són oficials (sentinel només omple cel·les sense oficial; EFFIS es salta per a anys amb oficial). Així, amb `reference_year=2026`, `year_minus_2` (2024) surt gairebé tot `source=official` si hi ha `official_2024.geojson`.
+
 ## Proves 2024 / 2026
 
 Workflow manual **`prova-sentinel`** (GitHub → Actions → *prova-sentinel* → *Run workflow*):
@@ -176,7 +192,8 @@ Artefactes típics:
 CLI local (sense secrets → skip net exit 0):
 
 ```bash
-python scripts/map_scars_openeo.py --year 2024 --max-aois 8 --dry-run
+python scripts/map_scars_openeo.py --year 2024 --max-aois 8 \
+  --threshold-core 0.35 --threshold-grow 0.22 --forest-mask --dry-run
 python scripts/validate_against_official.py --year 2024
 ```
 

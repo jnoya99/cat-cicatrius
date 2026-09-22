@@ -3,6 +3,12 @@
 
 Sparse output: only burned / intersecting cells.
 Join keys: lon/lat rounded to 0.001° and dense_index (NOT UTM 100 m).
+
+Geometry priority per burn year:
+  1. official (DARPA/ICGC) when scars/official_{year}.geojson exists
+  2. sentinel (dNBR) only fills years/areas without official coverage
+  3. effis lowest priority; skipped for years that already have official
+Official cells are never overwritten by sentinel/effis for the same year.
 """
 
 from __future__ import annotations
@@ -204,17 +210,57 @@ def empty_geojson(path: Path) -> None:
         f.write("\n")
 
 
-def merge_rows(rows: list[dict]) -> list[dict]:
-    """Dedupe by dense_index+burn_year; keep max frac and prefer official source."""
+def years_with_official(scar_paths: list[Path]) -> set[int]:
+    """Years that have a non-empty official_{year}.geojson."""
+    years: set[int] = set()
+    for p in scar_paths:
+        if not p.name.lower().startswith("official"):
+            continue
+        if p.stat().st_size <= 20:
+            continue
+        for part in p.stem.replace("-", "_").split("_"):
+            if part.isdigit() and len(part) == 4:
+                years.add(int(part))
+                break
+    return years
+
+
+def merge_rows(rows: list[dict], official_years: set[int] | None = None) -> list[dict]:
+    """Dedupe by dense_index+burn_year; official wins; sentinel gap-fills.
+
+    For years with official coverage:
+      - keep all official cells
+      - keep sentinel only where dense_index not already official (gap fill)
+      - drop effis entirely (noisy when DARPA/ICGC exists)
+    """
+    official_years = official_years or set()
     rank = {"official": 3, "bombers": 3, "sentinel": 2, "effis": 1}
+
+    # First pass: collect official cell keys per year
+    official_keys: set[tuple[int, int]] = set()
+    for r in rows:
+        if r["source"] == "official":
+            official_keys.add((r["dense_index"], r["burn_year"]))
+
     best: dict[tuple[int, int], dict] = {}
     for r in rows:
-        key = (r["dense_index"], r["burn_year"])
+        src = r["source"]
+        by = r["burn_year"]
+        key = (r["dense_index"], by)
+
+        if by in official_years:
+            if src == "effis":
+                continue  # official year → no EFFIS
+            if src == "sentinel" and key in official_keys:
+                continue  # do not overwrite / duplicate official cells
+            if src == "sentinel" and key not in official_keys:
+                pass  # gap fill OK
+
         cur = best.get(key)
         if cur is None:
             best[key] = r
             continue
-        if rank.get(r["source"], 0) > rank.get(cur["source"], 0):
+        if rank.get(src, 0) > rank.get(cur["source"], 0):
             r = {**r, "frac_burned": max(r["frac_burned"], cur["frac_burned"])}
             best[key] = r
         else:
@@ -236,6 +282,28 @@ def main() -> int:
     print(f"reference_year={reference_year}")
 
     scar_paths = sorted(args.scars_dir.glob("*.geojson"))
+    # Prefer combined sentinel_{year}.geojson over per-AOI sentinel_{year}_*.geojson
+    combined_sentinel_years = set()
+    for pth in scar_paths:
+        parts = pth.stem.split("_")
+        if len(parts) == 2 and parts[0] == "sentinel" and parts[1].isdigit():
+            combined_sentinel_years.add(parts[1])
+    if combined_sentinel_years:
+        before = len(scar_paths)
+        scar_paths = [
+            pth
+            for pth in scar_paths
+            if not (
+                pth.stem.startswith("sentinel_")
+                and pth.stem.count("_") >= 2
+                and pth.stem.split("_")[1] in combined_sentinel_years
+            )
+        ]
+        print(
+            f"Skipping per-AOI sentinel files when combined exists "
+            f"({before} → {len(scar_paths)} scar files)",
+            flush=True,
+        )
     out_parquet = args.out_dir / "burned_cells.parquet"
     out_geojson = args.out_dir / "burned_cells.geojson"
 
@@ -278,8 +346,14 @@ def main() -> int:
                     sample_polygon_to_cells(g, by, source, fire_id, reference_year)
                 )
 
-    merged = merge_rows(all_rows)
+    off_years = years_with_official(scar_paths)
+    print(f"Official coverage years (priority): {sorted(off_years) or 'none'}")
+    merged = merge_rows(all_rows, official_years=off_years)
     df = pd.DataFrame(merged, columns=COLUMNS) if merged else pd.DataFrame(columns=COLUMNS)
+    if not df.empty:
+        src_counts = df.groupby(["burn_year", "source"]).size()
+        print("Cells by burn_year × source:")
+        print(src_counts.to_string())
     if not df.empty:
         # Recompute year_minus flags with reference_year
         df["year_minus_1"] = (df["burn_year"] == reference_year - 1).astype(int)
