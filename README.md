@@ -165,21 +165,26 @@ Codi: MIT (vegeu `LICENSE`). Les dades respecten la llicència de cada proveïdo
 | `--threshold-core` | `0.35` | Nucli cremat segur |
 | `--threshold-grow` | `0.22` | Expansió només contiguous al nucli |
 | `--threshold` | — | Alias legacy: posa core i grow al mateix valor |
-| `--min-ha` | `1.0` | Descarta fragments petits |
+| `--min-ha` | `1.0` | Descarta fragments polígonitzats petits |
+| `--min-seed-ha` | `1.0` | Només processa llavors amb àrea de la geometria (abans del buffer) **> 1 ha** |
+| `--max-aois` | `0` | `0` = sense límit (totes les llavors que passen `min-seed-ha`); >0 limita a les N més grans |
+| `--post-windows` | `2` | Finestres post-foc (+7–30 / +30–60 d), sempre retallades a avui (UTC) |
 | Buffers cerca | 800 m oficial / 1200 m EFFIS | Clip a llavor ⊕ 300 m |
 | `--forest-mask` | on | ESA WorldCover 2021 via CDSE openEO (`ESA_WORLDCOVER_10M_2021_V2`); classes **10** (arbres) i **20** (matoll); exclou conreu, urbà, aigua, nues |
 | `--morph-core` | on | Opening 1px només al nucli (abans de créixer) |
 
 El producte `build_burned_cells.py` priorita `official_{year}`: si existeix, les cel·les d’aquell any són oficials (sentinel només omple cel·les sense oficial; EFFIS es salta per a anys amb oficial). Així, amb `reference_year=2026`, `year_minus_2` (2024) surt gairebé tot `source=official` si hi ha `official_2024.geojson`.
 
-## Proves 2024 / 2026
+## Proves 2024 / 2025 / 2026
+
+**Política operativa (defecte):** processar **totes** les llavors d’incendi amb àrea de llavor **> 1 ha** (`--min-seed-ha 1`, `--max-aois 0`), amb **2 finestres post-foc** (`--post-windows 2`) retallades a avui (UTC). No hi ha límit per defecte de 8 AOIs.
 
 Workflow manual **`prova-sentinel`** (GitHub → Actions → *prova-sentinel* → *Run workflow*):
 
 | Input | Valors | Notes |
 |---|---|---|
-| `year` | `2024` o `2026` | 2024 valida contra `official_2024`; 2026 usa finestres d’estiu i, si cal, llavors EFFIS/oficial de l’any anterior |
-| `max_aois` | p. ex. `8`–`12` | Limita crèdits CDSE (les AOIs més grans primer) |
+| `year` | `2024` / `2025` / `2026` | 2024 valida contra `official_2024`; llavors només del mateix any |
+| `max_aois` | defecte `0` | `0` = sense límit; poseu p. ex. `8` només per proves ràpides de crèdits |
 
 Passos del workflow: checkout → Python 3.12 → `pip install -r requirements.txt` (inclou `openeo` + `rasterio`) → fetch official/EFFIS → `map_scars_openeo.py` → (2024) `validate_against_official.py` → `build_burned_cells.py` → `publish_docs.py` → commit `docs/` + `scars/sentinel_*.geojson` → avís per correu (issue).
 
@@ -192,7 +197,8 @@ Artefactes típics:
 CLI local (sense secrets → skip net exit 0):
 
 ```bash
-python scripts/map_scars_openeo.py --year 2024 --max-aois 8 \
+python scripts/map_scars_openeo.py --year 2024 --max-aois 0 \
+  --min-seed-ha 1 --post-windows 2 \
   --threshold-core 0.35 --threshold-grow 0.22 --forest-mask --dry-run
 python scripts/validate_against_official.py --year 2024
 ```

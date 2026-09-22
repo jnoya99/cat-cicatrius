@@ -15,11 +15,13 @@ Pipeline:
   - Same-year seeds only (never year-1 locations for year Y burns):
     official_{Y} → effis_{Y} → Gencat event points (municipality centroid).
   - Buffer ~800 m (official/gencat) / ~1200 m (EFFIS); +50% if seed >500 ha;
-    merge overlaps; skip tiny <~5 ha points; cap --max-aois.
+    merge overlaps; skip seeds with seed-geometry area < --min-seed-ha
+    (default 1.0 ha); skip tiny <~5 ha Gencat points; --max-aois 0 = no cap.
   - Temporal extents are always clipped to min(end, UTC today). Empty post
     windows after clipping are dropped; AOIs with no remaining post window
-    are skipped. Undated 2026 posts: ~Jun15→today (≤3 slices); undated past
-    years: Aug15–Nov15 seasonal slices (clipped). Dated: +7–30/+30–60/+60–90d.
+    are skipped. Undated current-year posts: ~Jun15→today (≤n slices); undated
+    past years: Aug15–Nov15 seasonal slices (clipped). Dated default 2 windows:
+    +7–30/+30–60d (3rd +60–90d when --post-windows 3).
   - Per AOI: pre median S2 L2A (B08,B12,SCL); multi-post max dNBR; region-grow
     (core≥0.35, grow≥0.22); optional morph on core; WorldCover forest/scrub
     mask; clip to seed⊕300 m; drop parts < min-ha (default 1.0).
@@ -53,7 +55,8 @@ CDSE_URL = "https://openeo.dataspace.copernicus.eu"
 BUFFER_OFFICIAL_M = 800.0
 BUFFER_EFFIS_M = 1200.0
 HUGE_HA = 500.0  # seed area: buffer +50%
-MIN_POINT_HA = 5.0  # skip tiny point-only seeds
+MIN_POINT_HA = 5.0  # skip tiny point-only seeds (Gencat reported ha)
+MIN_SEED_HA = 1.0  # skip polygon seeds with seed-geom area below this (ha)
 MIN_PART_HA = 1.0  # drop polygonized parts smaller than this
 CLIP_SEED_BUFFER_M = 300.0  # clip scars to seed ⊕ this buffer
 EFFIS_OVERLAP_FRAC = 0.3  # skip EFFIS if ≥ this fraction overlaps official
@@ -224,13 +227,14 @@ def _slice_range(start: date, end: date, n_windows: int) -> list[tuple[str, str]
 
 
 def post_windows_for_fire(
-    fire_date: date | None, year: int, n_windows: int = 3, today: date | None = None
+    fire_date: date | None, year: int, n_windows: int = 2, today: date | None = None
 ) -> list[tuple[str, str]]:
     """Sequential post-fire composite windows for max-dNBR compositing.
 
     Always clipped to UTC today; empty/invalid windows after clipping are dropped.
 
-    With fire_date and n_windows==3 (preferred): +7–30d, +30–60d, +60–90d.
+    With fire_date and n_windows==2 (default): +7–30d, +30–60d.
+    With fire_date and n_windows==3: +7–30d, +30–60d, +60–90d.
     Undated incomplete year (year == today.year): Jun15 → today, ≤n slices.
     Undated past years: Aug15–Nov15 seasonal slices (then clipped).
     """
@@ -257,6 +261,14 @@ def post_windows_for_fire(
             if b <= a:
                 b = a + timedelta(days=14)
             raw.append((a.isoformat(), b.isoformat()))
+    elif n_windows == 2:
+        specs = [(7, 30), (30, 60)]
+        for a_off, b_off in specs:
+            a = fire_date + timedelta(days=a_off)
+            b = fire_date + timedelta(days=b_off)
+            if b <= a:
+                b = a + timedelta(days=14)
+            raw.append((a.isoformat(), b.isoformat()))
     elif n_windows == 1:
         a = fire_date + timedelta(days=7)
         b = fire_date + timedelta(days=60)
@@ -272,7 +284,7 @@ def post_windows_for_fire(
 
 
 def windows_for_fire(
-    fire_date: date | None, year: int, n_post_windows: int = 3, today: date | None = None
+    fire_date: date | None, year: int, n_post_windows: int = 2, today: date | None = None
 ) -> tuple[tuple[str, str] | None, list[tuple[str, str]]]:
     """Return (pre_window|None, list_of_post_windows) all clipped to UTC today."""
     today = today or utc_today()
@@ -689,6 +701,7 @@ def build_aois(
     max_aois: int,
     aoi_path: Path | None,
     prefer_official: bool = True,
+    min_seed_ha: float = MIN_SEED_HA,
 ) -> list[Aoi]:
     import geopandas as gpd
     from shapely.ops import unary_union
@@ -708,6 +721,7 @@ def build_aois(
     metric["area_ha"] = metric.geometry.area / 10_000.0
 
     aois_raw: list[dict] = []
+    skipped_min_seed = 0
     for idx, row in metric.iterrows():
         geom = row.geometry
         if geom is None or geom.is_empty:
@@ -723,20 +737,37 @@ def build_aois(
 
         is_point = geom.geom_type in ("Point", "MultiPoint")
         area_ha = float(row["area_ha"])
-        if is_point and area_ha < MIN_POINT_HA:
-            print(f"  skip tiny point seed idx={idx}", flush=True)
-            continue
-        if (not is_point) and area_ha < 0.01:
-            continue
+        # Points: seed geom area is ~0; use reported AREA_HA when present
+        if is_point:
+            reported = None
+            for k in ("AREA_HA", "area_ha", "haforestal", "AREA_HA_"):
+                if k in props and props[k] not in (None, ""):
+                    try:
+                        reported = float(props[k])
+                        break
+                    except (TypeError, ValueError):
+                        pass
+            if reported is not None:
+                area_ha = reported
+            if area_ha < max(min_seed_ha, MIN_POINT_HA):
+                print(
+                    f"  skip tiny point seed idx={idx} area_ha={area_ha:.2f}",
+                    flush=True,
+                )
+                skipped_min_seed += 1
+                continue
+        else:
+            # Seed polygon area (before buffer) must exceed --min-seed-ha
+            if area_ha < min_seed_ha:
+                skipped_min_seed += 1
+                continue
 
         src = str(row.get("_source", "aoi"))
         buf = _buffer_m_for(src, area_ha)
         # Points: give a minimum footprint before buffer (~radius for ~5 ha disk ≈ 126 m)
         if is_point:
             geom = geom.buffer(126.0)
-            area_ha = float(geom.area / 10_000.0)
-            if area_ha < MIN_POINT_HA:
-                continue
+            # keep reported/attributed area_ha for ranking; geom now has footprint
         seed_m = geom
         buffered = geom.buffer(buf)
         fire_d = parse_fire_date(props)
@@ -758,6 +789,12 @@ def build_aois(
             }
         )
 
+    if skipped_min_seed:
+        print(
+            f"[map_scars_openeo] skipped {skipped_min_seed} seeds with "
+            f"seed area < min_seed_ha={min_seed_ha}",
+            flush=True,
+        )
     if not aois_raw:
         return []
 
@@ -1224,7 +1261,7 @@ def run_aoi_job(
     min_ha: float = MIN_PART_HA,
     forest_mask: bool = True,
     morph_core: bool = True,
-    post_windows: int = 3,
+    post_windows: int = 2,
 ) -> Path | None:
     pre, posts = windows_for_fire(aoi.fire_date, year, n_post_windows=post_windows)
     today = utc_today()
@@ -1375,7 +1412,12 @@ def write_combined(year: int, paths: list[Path]) -> Path:
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--year", type=int, default=date.today().year, help="Burn year (e.g. 2024|2025|2026)")
-    ap.add_argument("--max-aois", type=int, default=15, help="Cap AOIs (largest first); CI default 15")
+    ap.add_argument(
+        "--max-aois",
+        type=int,
+        default=0,
+        help="Cap AOIs (largest first); 0 = no cap / process all that pass min-seed-ha",
+    )
     ap.add_argument("--aoi", type=Path, default=None, help="Optional GeoJSON AOI override")
     ap.add_argument(
         "--threshold-core",
@@ -1403,6 +1445,13 @@ def main() -> int:
         help=f"Drop polygonized parts smaller than this (default {MIN_PART_HA})",
     )
     ap.add_argument(
+        "--min-seed-ha",
+        type=float,
+        default=MIN_SEED_HA,
+        help=f"Skip fire seeds whose seed-geometry area (ha, before buffer) "
+        f"is below this (default {MIN_SEED_HA})",
+    )
+    ap.add_argument(
         "--prefer-official",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -1423,9 +1472,10 @@ def main() -> int:
     ap.add_argument(
         "--post-windows",
         type=int,
-        default=3,
+        default=2,
         help="Number of sequential post-fire composites; per-pixel max dNBR "
-        "(default 3: +7–30/+30–60/+60–90d after fire_date, or seasonal slices)",
+        "(default 2: +7–30/+30–60d after fire_date, or seasonal slices; "
+        "use 3 for +60–90d too)",
     )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force-skip", action="store_true", help="Always skip (CI smoke)")
@@ -1466,8 +1516,9 @@ def main() -> int:
     n_post = max(1, int(args.post_windows))
     print(
         f"[map_scars_openeo] year={args.year} max_aois={args.max_aois} "
-        f"threshold_core={threshold_core} threshold_grow={threshold_grow} "
-        f"min_ha={args.min_ha} prefer_official={args.prefer_official} "
+        f"(0=unlimited) threshold_core={threshold_core} "
+        f"threshold_grow={threshold_grow} min_ha={args.min_ha} "
+        f"min_seed_ha={args.min_seed_ha} prefer_official={args.prefer_official} "
         f"forest_mask={args.forest_mask} morph_core={args.morph_core} "
         f"post_windows={n_post} "
         f"buffer_official_m={BUFFER_OFFICIAL_M} buffer_effis_m={BUFFER_EFFIS_M} "
@@ -1488,7 +1539,11 @@ def main() -> int:
     )
 
     aois = build_aois(
-        args.year, args.max_aois, args.aoi, prefer_official=args.prefer_official
+        args.year,
+        args.max_aois,
+        args.aoi,
+        prefer_official=args.prefer_official,
+        min_seed_ha=float(args.min_seed_ha),
     )
     if not aois:
         # Last resort: do NOT process all of Catalonia as one cube
