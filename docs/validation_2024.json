@@ -13,17 +13,17 @@
   },
   "area_ha": {
     "official": 1213.31,
-    "sentinel": 397.47
+    "sentinel": 655.5
   },
   "metrics": {
     "n_cells_official": 2045,
-    "n_cells_sentinel": 873,
-    "true_positives": 867,
-    "false_positives": 6,
-    "false_negatives": 1178,
-    "iou": 0.4227,
-    "precision": 0.9931,
-    "recall": 0.424,
-    "f1": 0.5942
+    "n_cells_sentinel": 1255,
+    "true_positives": 1252,
+    "false_positives": 3,
+    "false_negatives": 793,
+    "iou": 0.6113,
+    "precision": 0.9976,
+    "recall": 0.6122,
+    "f1": 0.7588
   }
 }
