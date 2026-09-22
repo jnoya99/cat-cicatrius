@@ -1,0 +1,12 @@
+# Core (Gencat ingest, EFFIS, grid, publish) — stdlib + light deps
+requests>=2.31.0
+pandas>=2.0.0
+pyarrow>=14.0.0
+
+# Geometry / rasterize onto app grid
+geopandas>=0.14.0
+shapely>=2.0.0
+pyproj>=3.6.0
+
+# Optional: CDSE openEO (map_scars_openeo.py) — only needed with CDSE_USER/CDSE_PASSWORD
+# openeo>=0.30.0

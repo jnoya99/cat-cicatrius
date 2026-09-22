@@ -1,0 +1,16 @@
+{
+  "crs": "EPSG:4326",
+  "coordinate_system": "WGS84 lon/lat",
+  "step_deg": 0.001,
+  "min_lon": 0.15,
+  "min_lat": 40.42,
+  "nlon": 3271,
+  "n_forest_cells_approx": 1338311,
+  "notes": [
+    "App UI says ~100 m but cells are ~0.001° (~80–110 m depending on latitude).",
+    "Lookup: ii = round((lon - MIN_LON) / STEP), jj = round((lat - MIN_LAT) / STEP).",
+    "dense_index = jj * NLON + ii.",
+    "Do NOT use EPSG:25831 100 m UTM cell ids for joins."
+  ],
+  "join_keys": ["lon_rounded_0.001", "lat_rounded_0.001", "dense_index"]
+}

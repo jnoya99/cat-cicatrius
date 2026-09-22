@@ -1,0 +1,24 @@
+{
+  "n_events": 8191,
+  "years": {
+    "2011": 586,
+    "2012": 747,
+    "2013": 602,
+    "2014": 462,
+    "2015": 509,
+    "2016": 560,
+    "2017": 629,
+    "2018": 312,
+    "2019": 545,
+    "2020": 289,
+    "2021": 607,
+    "2022": 643,
+    "2023": 617,
+    "2024": 437,
+    "2026": 646
+  },
+  "sources": {
+    "current": "https://analisi.transparenciacatalunya.cat/resource/9r29-e8ha.json",
+    "historic": "https://analisi.transparenciacatalunya.cat/resource/bks7-dkfd.json"
+  }
+}

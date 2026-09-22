@@ -1,0 +1,15 @@
+{
+  "base_url_pattern": "http://www.gencat.cat/agricultura/sig/bases/incendis{yy}.zip",
+  "results": [
+    {
+      "year": 2023,
+      "url": "http://www.gencat.cat/agricultura/sig/bases/incendis23.zip",
+      "available": true
+    },
+    {
+      "year": 2024,
+      "url": "http://www.gencat.cat/agricultura/sig/bases/incendis24.zip",
+      "available": true
+    }
+  ]
+}

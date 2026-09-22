@@ -1,0 +1,37 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+.env
+.rds
+*.rds
+.Rhistory
+.RData
+.DS_Store
+.idea/
+.vscode/
+.pytest_cache/
+.mypy_cache/
+*.xlsx
+*.xls
+
+# Large raw downloads (keep scars/*.geojson and docs/ outputs)
+data/raw/**
+!data/raw/.gitkeep
+data/official/**/*.shp
+data/official/**/*.shx
+data/official/**/*.dbf
+data/official/**/*.prj
+data/official/**/*.cpg
+data/official/**/*.sbn
+data/official/**/*.sbx
+data/official/**/*.zip
+!data/official/.gitkeep
+!data/raw/.gitkeep
+
+# Local scratch
+*.tmp
+.tmp/

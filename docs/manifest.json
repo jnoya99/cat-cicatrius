@@ -1,0 +1,96 @@
+{
+  "version": 1,
+  "product": "cat-cicatrius",
+  "description": "Cicatrius d'incendis forestals alineades a la malla 0.001° de Bolets Explorador",
+  "last_run_utc": "2026-09-22T05:21:30Z",
+  "last_run_europe_madrid": "2026-09-22T07:21:30+0200",
+  "reference_year": 2026,
+  "grid": {
+    "crs": "EPSG:4326",
+    "step_deg": 0.001,
+    "min_lon": 0.15,
+    "min_lat": 40.42,
+    "nlon": 3271
+  },
+  "files": {
+    "burned_cells.parquet": {
+      "path": "docs/burned_cells.parquet",
+      "sha256": "6028ae67f68cf3783afde2ffb49e75367764a799620a791484d013c7e0a9961d",
+      "n_rows": 21137
+    },
+    "burned_cells.geojson": {
+      "path": "docs/burned_cells.geojson",
+      "sha256": "19fc25e849c9cd8ca1773ad30251c44da2237fa1f0c1ab60ff6b528688dd75e5",
+      "note": "Summary points (may be capped); prefer parquet for full sparse set"
+    }
+  },
+  "schema": [
+    {
+      "name": "lon",
+      "type": "float",
+      "desc": "WGS84 longitude rounded to 0.001°"
+    },
+    {
+      "name": "lat",
+      "type": "float",
+      "desc": "WGS84 latitude rounded to 0.001°"
+    },
+    {
+      "name": "dense_index",
+      "type": "int",
+      "desc": "jj * NLON + ii (app dense key)"
+    },
+    {
+      "name": "burn_year",
+      "type": "int",
+      "desc": "Calendar year of burn"
+    },
+    {
+      "name": "year_minus_1",
+      "type": "int 0/1",
+      "desc": "1 if burn_year == reference_year - 1"
+    },
+    {
+      "name": "year_minus_2",
+      "type": "int 0/1",
+      "desc": "1 if burn_year == reference_year - 2"
+    },
+    {
+      "name": "frac_burned",
+      "type": "float 0–1",
+      "desc": "Fraction of cell intersecting scar"
+    },
+    {
+      "name": "severity",
+      "type": "int 0–3 or null",
+      "desc": "Optional severity class"
+    },
+    {
+      "name": "source",
+      "type": "string",
+      "desc": "official|sentinel|effis|bombers"
+    },
+    {
+      "name": "confidence",
+      "type": "string",
+      "desc": "low|medium|high"
+    },
+    {
+      "name": "fire_id",
+      "type": "string or null",
+      "desc": "Upstream feature id if known"
+    }
+  ],
+  "attribution": [
+    "Gencat / Transparència Catalunya (taules d'incendis)",
+    "DARPA / ICGC (perímetres oficials incendisYY.zip)",
+    "EFFIS / Copernicus EMS (WFS burn areas, opcional)",
+    "CDSE / Sentinel-2 (dNBR openEO, quan hi ha credencials)"
+  ],
+  "consume": {
+    "github_pages": "https://jnoya99.github.io/cat-cicatrius/burned_cells.parquet",
+    "raw": "https://raw.githubusercontent.com/jnoya99/cat-cicatrius/main/docs/burned_cells.parquet",
+    "jsdelivr": "https://cdn.jsdelivr.net/gh/jnoya99/cat-cicatrius@main/docs/burned_cells.parquet"
+  },
+  "schedule_note": "Cron 0 6 1 11,2 * UTC ≈ 07:00 / 08:00 Europe/Madrid el 1 Nov i 1 Feb (no diari FIRMS)"
+}

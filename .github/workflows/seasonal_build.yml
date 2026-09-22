@@ -1,0 +1,75 @@
+name: seasonal-build
+
+# Seasonal (NOT daily FIRMS): before morel season.
+# Cron is always UTC on GitHub Actions.
+#   0 6 1 11,2 *  → 06:00 UTC on 1 Nov and 1 Feb
+#   Europe/Madrid: ≈ 07:00 CET (Feb) / ≈ 08:00 CET→ actually Nov is CET (UTC+1) → 07:00;
+#                  Feb is CET → 07:00; if CEST ever applied would be 08:00.
+# Prefer workflow_dispatch for manual runs.
+
+"on":
+  schedule:
+    - cron: "0 6 1 11,2 *"
+  workflow_dispatch:
+
+concurrency:
+  group: seasonal-cicatrius
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Ingest Gencat open-data tables
+        run: python scripts/ingest_gencat.py
+
+      - name: Fetch official DARPA/ICGC SHP (best-effort)
+        run: python scripts/fetch_official_shp.py
+        continue-on-error: true
+
+      - name: Fetch EFFIS WFS Catalonia (best-effort)
+        run: python scripts/fetch_effis.py
+        continue-on-error: true
+
+      - name: Sentinel-2 dNBR via CDSE openEO (optional secrets)
+        env:
+          CDSE_USER: ${{ secrets.CDSE_USER }}
+          CDSE_PASSWORD: ${{ secrets.CDSE_PASSWORD }}
+        run: python scripts/map_scars_openeo.py
+        continue-on-error: true
+
+      - name: Build burned cells on app 0.001° grid
+        run: python scripts/build_burned_cells.py
+
+      - name: Publish docs/ + manifest
+        run: python scripts/publish_docs.py
+
+      - name: Commit artifacts if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add events/*.csv events/*.json docs/ scars/*.geojson grid/app_grid.json || true
+          # Do not commit large raw SHP/ZIP under data/official
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "data: seasonal cicatrius build [skip ci]"
+            git pull --rebase origin main
+            git push
+          fi
