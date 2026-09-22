@@ -147,17 +147,22 @@ jobs:
             exit 0
           fi
           git commit -m "data: docs after sentinel ${YEAR} [skip ci]"
+          # fetch_official/effis may leave unstaged dirt that blocks rebase
+          git stash push -u -m "prova-sentinel-docs-pre-rebase" || true
           for i in 1 2 3 4 5; do
             git fetch origin main
             if git rebase origin/main; then
-              git push origin HEAD:main && exit 0
+              git push origin HEAD:main
+              git stash pop || true
+              exit 0
             fi
             # Binary docs: keep the just-rebuilt copy
             git checkout --ours docs/burned_cells.parquet docs/burned_cells.geojson docs/manifest.json
             git add docs/burned_cells.parquet docs/burned_cells.geojson docs/manifest.json
-            GIT_EDITOR=true git rebase --continue || true
+            GIT_EDITOR=true git rebase --continue || git rebase --abort || true
             sleep $((i * 3))
           done
+          git stash pop || true
           echo "Failed to push docs after retries" >&2
           exit 1
 
