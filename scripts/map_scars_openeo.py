@@ -14,10 +14,11 @@ openEO automation.
 Pipeline:
   - Prefer scars/official_{year}.geojson seeds over EFFIS when present
     (--prefer-official, default on); year-1 seeds when needed (e.g. 2026).
-  - Buffer ~800 m (official) / ~1200 m (EFFIS); +50% if seed >500 ha; merge overlaps;
+  - Buffer ~500 m (official) / ~800 m (EFFIS); +50% if seed >500 ha; merge overlaps;
     skip tiny <~5 ha points; cap --max-aois.
   - Per AOI: pre/post median S2 L2A (B08,B12,SCL), cloud-mask SCL, NBR, dNBR≥threshold
-    (default 0.27). Clip scars to seed buffered 300 m; drop parts < min-ha (default 1.0).
+    (default 0.35). Clip scars to seed buffered 150 m; drop parts < min-ha (default 2.0).
+    Morphological opening (1px erode+dilate) before polygonize to kill FP speckles.
   - Batch jobs → GeoTIFF → local polygonize → scars/sentinel_{year}_{id}.geojson
     + combined scars/sentinel_{year}.geojson.
 
@@ -41,14 +42,14 @@ ROOT = Path(__file__).resolve().parents[1]
 SCARS_DIR = ROOT / "scars"
 TMP_DIR = ROOT / ".tmp" / "openeo"
 
-DNBR_THRESHOLD = 0.27
+DNBR_THRESHOLD = 0.35
 CDSE_URL = "https://openeo.dataspace.copernicus.eu"
-BUFFER_OFFICIAL_M = 800.0
-BUFFER_EFFIS_M = 1200.0
+BUFFER_OFFICIAL_M = 500.0
+BUFFER_EFFIS_M = 800.0
 HUGE_HA = 500.0  # seed area: buffer +50%
 MIN_POINT_HA = 5.0  # skip tiny point-only seeds
-MIN_PART_HA = 1.0  # drop polygonized parts smaller than this
-CLIP_SEED_BUFFER_M = 300.0  # clip scars to seed ⊕ this buffer
+MIN_PART_HA = 2.0  # drop polygonized parts smaller than this
+CLIP_SEED_BUFFER_M = 150.0  # clip scars to seed ⊕ this buffer
 EFFIS_OVERLAP_FRAC = 0.3  # skip EFFIS if ≥ this fraction overlaps official
 AREA_CRS = "EPSG:25831"  # Catalonia UTM 31N
 SCL_CLOUD = {3, 8, 9, 10}  # cloud shadow, cloud med/high, cirrus
@@ -539,6 +540,52 @@ def build_dnbr_cube(connection, extent: dict, pre: tuple[str, str], post: tuple[
     return nbr_pre - nbr_post
 
 
+
+def _binary_erode(mask, iterations: int = 1):
+    """3x3 binary erosion (all-neighbors). Prefer scipy; else numpy."""
+    import numpy as np
+
+    try:
+        from scipy import ndimage
+
+        return ndimage.binary_erosion(mask, iterations=iterations)
+    except ImportError:
+        out = mask.astype(bool)
+        for _ in range(iterations):
+            padded = np.pad(out, 1, mode="constant", constant_values=False)
+            neigh = True
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    neigh = neigh & padded[1 + di : 1 + di + out.shape[0], 1 + dj : 1 + dj + out.shape[1]]
+            out = neigh
+        return out
+
+
+def _binary_dilate(mask, iterations: int = 1):
+    """3x3 binary dilation (any-neighbor). Prefer scipy; else numpy."""
+    import numpy as np
+
+    try:
+        from scipy import ndimage
+
+        return ndimage.binary_dilation(mask, iterations=iterations)
+    except ImportError:
+        out = mask.astype(bool)
+        for _ in range(iterations):
+            padded = np.pad(out, 1, mode="constant", constant_values=False)
+            neigh = False
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    neigh = neigh | padded[1 + di : 1 + di + out.shape[0], 1 + dj : 1 + dj + out.shape[1]]
+            out = neigh
+        return out
+
+
+def morphological_opening(mask, iterations: int = 1):
+    """Erode then dilate to remove isolated FP speckles."""
+    return _binary_dilate(_binary_erode(mask, iterations), iterations)
+
+
 def polygonize_tiff(
     tiff_path: Path,
     threshold: float = DNBR_THRESHOLD,
@@ -547,6 +594,7 @@ def polygonize_tiff(
 ) -> list[dict]:
     """Polygonize burned pixels (dNBR >= threshold) → GeoJSON-like features.
 
+    Applies 1px morphological opening before polygonize (anti-FP speckles).
     Drops parts < min_ha. Optionally clips to seed geometry buffered CLIP_SEED_BUFFER_M.
     """
     import numpy as np
@@ -564,6 +612,16 @@ def polygonize_tiff(
         mask = np.isfinite(data) & (data >= threshold)
         if nodata is not None:
             mask &= data != nodata
+        if not mask.any():
+            return []
+        n_before = int(mask.sum())
+        mask = morphological_opening(mask, iterations=1)
+        n_after = int(mask.sum())
+        print(
+            f"    morph opening 1px: burned pixels {n_before} → {n_after} "
+            f"(removed {n_before - n_after})",
+            flush=True,
+        )
         if not mask.any():
             return []
         shapes_gen = rio_features.shapes(
@@ -778,6 +836,16 @@ def main() -> int:
         f"prefer_official={args.prefer_official} "
         f"buffer_official_m={BUFFER_OFFICIAL_M} buffer_effis_m={BUFFER_EFFIS_M} "
         f"clip_seed_buffer_m={CLIP_SEED_BUFFER_M} dry_run={args.dry_run}",
+        flush=True,
+    )
+    print(
+        "[map_scars_openeo] anti-FP settings: "
+        f"dnbr_threshold={args.threshold} (default {DNBR_THRESHOLD}), "
+        f"clip_seed_buffer_m={CLIP_SEED_BUFFER_M}, "
+        f"search_buffer_official_m={BUFFER_OFFICIAL_M}, "
+        f"search_buffer_effis_m={BUFFER_EFFIS_M}, "
+        f"min_ha={args.min_ha} (default {MIN_PART_HA}), "
+        "morph_opening=1px erode+dilate",
         flush=True,
     )
 
