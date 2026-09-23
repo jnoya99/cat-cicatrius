@@ -8,7 +8,8 @@ RB01 little-endian:
   n × (uint32 dense_index, uint16 burn_year, uint8 severity)
 severity: 0=unknown, 1=baixa, 2=moderada, 3=alta
 
-Keeps last 9 calendar years (yref-8 … yref), newest burn_year per dense_index.
+Keeps last 2 calendar years (yref-1 … yref), newest burn_year per dense_index.
+Older cicatrices stay in burned_cells.parquet (Incendis layer only).
 Applies the same source policy as the explorer (official ≤2024; sentinel/effis/official ≥2025).
 """
 from __future__ import annotations
@@ -35,7 +36,7 @@ def build_recent_burns(
     parquet_path: Path,
     out_path: Path,
     reference_year: int | None = None,
-    window_years: int = 9,
+    window_years: int = 2,
 ) -> dict:
     import pandas as pd
 
@@ -103,7 +104,7 @@ def main() -> int:
     ap.add_argument("--parquet", type=Path, default=DOCS / "burned_cells.parquet")
     ap.add_argument("--out", type=Path, default=DOCS / "recent_burns.bin.gz")
     ap.add_argument("--reference-year", type=int, default=None)
-    ap.add_argument("--window-years", type=int, default=9)
+    ap.add_argument("--window-years", type=int, default=2)
     args = ap.parse_args()
     if not args.parquet.exists():
         raise SystemExit(f"missing parquet: {args.parquet}")

@@ -132,7 +132,7 @@ def main() -> int:
             "recent_burns.bin.gz": {
                 "path": "docs/recent_burns.bin.gz",
                 "sha256": file_sha256(DOCS / "recent_burns.bin.gz"),
-                "note": "RB01 light index (last 9y) for fireFac/fireSuppress; gunzip in browser",
+                "note": "RB01 light index (yref + yref-1 only) for fireFac/fireSuppress; gunzip in browser",
                 "bytes": (DOCS / "recent_burns.bin.gz").stat().st_size if (DOCS / "recent_burns.bin.gz").exists() else None,
             },
         },
