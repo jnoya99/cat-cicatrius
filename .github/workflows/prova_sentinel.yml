@@ -128,9 +128,10 @@ jobs:
                 git stash clear || true
                 exit 0
               fi
-              echo "Rebase conflict on attempt $i — keep our year scars, drop conflicting docs"
-              git checkout --ours scars/sentinel_${YEAR}.geojson scars/sentinel_${YEAR}_*.geojson 2>/dev/null || true
-              git checkout --theirs docs/burned_cells.parquet docs/burned_cells.geojson docs/manifest.json 2>/dev/null || true
+              echo "Rebase conflict on attempt $i — keep newly mapped year scars (theirs in rebase), drop conflicting docs"
+              # During rebase: ours=upstream main, theirs=commit being applied (new scars)
+              git checkout --theirs scars/sentinel_${YEAR}.geojson scars/sentinel_${YEAR}_*.geojson 2>/dev/null || true
+              git checkout --ours docs/burned_cells.parquet docs/burned_cells.geojson docs/manifest.json 2>/dev/null || true
               git add scars/sentinel_${YEAR}.geojson scars/sentinel_${YEAR}_*.geojson 2>/dev/null || true
               git add docs/validation_2024.json docs/validation_2024.md 2>/dev/null || true
               GIT_EDITOR=true git rebase --continue || git rebase --abort || true
@@ -170,8 +171,8 @@ jobs:
               git stash clear || true
               exit 0
             fi
-            # Binary docs: keep the just-rebuilt copy
-            git checkout --ours docs/burned_cells.parquet docs/burned_cells.geojson docs/manifest.json
+            # Binary docs: keep the just-rebuilt copy (theirs = commit being applied during rebase)
+            git checkout --theirs docs/burned_cells.parquet docs/burned_cells.geojson docs/manifest.json
             git add docs/burned_cells.parquet docs/burned_cells.geojson docs/manifest.json
             GIT_EDITOR=true git rebase --continue || git rebase --abort || true
             sleep $((i * 3))
