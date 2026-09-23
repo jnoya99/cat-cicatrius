@@ -142,6 +142,78 @@ def better_severity(a: str | None, b: str | None) -> str | None:
     return b
 
 
+
+def split_disconnected_sentinel_fire_ids(df):
+    """Within each (burn_year, fire_id) sentinel group, give each 4-connected
+    component on the 0.001° dense grid a distinct fire_id `{old}_{comp}`.
+
+    Official/EFFIS rows are left unchanged. Singleton components keep a `_0`
+    suffix only when the group had >1 component (so a lone patch stays bare
+    id unless siblings exist — actually always suffix when splitting a group
+    that has multiple components; single-component groups keep original id).
+    """
+    import pandas as pd
+
+    if df is None or df.empty or "fire_id" not in df.columns:
+        return df
+    nl = nlon()
+    out_ids = df["fire_id"].astype(object).copy()
+    mask = df["source"].astype(str) == "sentinel"
+    if not mask.any():
+        return df
+    n_groups_split = 0
+    n_components = 0
+    # Group by year + original fire_id
+    grouped = df.loc[mask].groupby(["burn_year", "fire_id"], sort=False)
+    for (by, fid), g in grouped:
+        if fid is None or (isinstance(fid, float) and fid != fid):
+            continue
+        idxs = list(g.index)
+        dens = g["dense_index"].astype(int).tolist()
+        if len(dens) <= 1:
+            n_components += 1
+            continue
+        present = set(dens)
+        # BFS 4-neighbour components
+        visited: set[int] = set()
+        comps: list[list[int]] = []  # lists of dense_index
+        for d0 in dens:
+            if d0 in visited:
+                continue
+            stack = [d0]
+            visited.add(d0)
+            comp = [d0]
+            while stack:
+                d = stack.pop()
+                for nb in (d - 1, d + 1, d - nl, d + nl):
+                    if nb in present and nb not in visited:
+                        visited.add(nb)
+                        stack.append(nb)
+                        comp.append(nb)
+            comps.append(comp)
+        n_components += len(comps)
+        if len(comps) <= 1:
+            continue
+        n_groups_split += 1
+        # Map dense -> component ordinal (stable: largest first, then min dense)
+        comps_sorted = sorted(comps, key=lambda c: (-len(c), min(c)))
+        dense_to_comp = {}
+        for ci, comp in enumerate(comps_sorted):
+            for d in comp:
+                dense_to_comp[d] = ci
+        fid_s = str(fid)
+        for ix, d in zip(idxs, dens):
+            out_ids.at[ix] = f"{fid_s}_{dense_to_comp[int(d)]}"
+    df = df.copy()
+    df["fire_id"] = out_ids
+    print(
+        f"Sentinel fire_id CC split: {n_groups_split} multi-component groups → "
+        f"{n_components} components (among sentinel cells)",
+        flush=True,
+    )
+    return df
+
+
 def infer_source(path: Path) -> str:
     name = path.name.lower()
     if name.startswith("official"):
@@ -471,16 +543,41 @@ def main() -> int:
                     break
             if fire_id is None:
                 fire_id = f"{Path(row['_path']).stem}_{idx}"
+            part_prop = None
+            if "part" in row.index and row["part"] not in (None, ""):
+                try:
+                    part_prop = int(row["part"])
+                except (TypeError, ValueError):
+                    part_prop = None
             props = {
                 k: row[k]
                 for k in gdf.columns
                 if k not in ("geometry", "_source", "_path", "_burn_year")
             }
             sev, dnbr_v = severity_from_feature(props, source)
-            for g in geoms:
+
+            def _already_part_suffixed(fid: str) -> bool:
+                """True if fid looks like '{seed}_{part}' (seed may contain underscores)."""
+                if "_" not in fid:
+                    return False
+                tail = fid.rsplit("_", 1)[-1]
+                return tail.isdigit()
+
+            for gi, g in enumerate(geoms):
+                fid_i = fire_id
+                if source == "sentinel":
+                    if not _already_part_suffixed(fire_id):
+                        if part_prop is not None and len(geoms) == 1:
+                            fid_i = f"{fire_id}_{part_prop}"
+                        elif part_prop is not None and len(geoms) > 1:
+                            fid_i = f"{fire_id}_{part_prop}_{gi}"
+                        elif len(geoms) > 1:
+                            fid_i = f"{fire_id}_{gi}"
+                    elif len(geoms) > 1:
+                        fid_i = f"{fire_id}_{gi}"
                 all_rows.extend(
                     sample_polygon_to_cells(
-                        g, by, source, fire_id, reference_year, severity=sev, dnbr=dnbr_v
+                        g, by, source, fid_i, reference_year, severity=sev, dnbr=dnbr_v
                     )
                 )
 
@@ -493,6 +590,8 @@ def main() -> int:
         print("Cells by burn_year × source:")
         print(src_counts.to_string())
     if not df.empty:
+        # Split disconnected sentinel patches that still share one fire_id
+        df = split_disconnected_sentinel_fire_ids(df)
         # Recompute year_minus flags with reference_year
         df["year_minus_1"] = (df["burn_year"] == reference_year - 1).astype(int)
         df["year_minus_2"] = (df["burn_year"] == reference_year - 2).astype(int)

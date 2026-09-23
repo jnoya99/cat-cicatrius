@@ -71,7 +71,7 @@ Només cel·les cremades / intersectades (sparses):
 | `dnbr` | float o null | Mitjana dNBR dels píxels cremats (si hi ha raster) |
 | `source` | string | `official` \| `sentinel` \| `effis` \| `bombers` |
 | `confidence` | string | `low` \| `medium` \| `high` |
-| `fire_id` | string \| null | Id amunt |
+| `fire_id` | string \| null | Id d’incendi; cicatrius Sentinel desconnectades → `{aoi}_{part}` (p. ex. `561276_18`) |
 
 
 ### Severitat (`severity`) — classes dNBR

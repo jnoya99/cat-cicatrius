@@ -32,7 +32,7 @@ SCHEMA_COLUMNS = [
     {"name": "dnbr", "type": "float or null", "desc": "Mean dNBR of burn pixels when available"},
     {"name": "source", "type": "string", "desc": "official|sentinel|effis|bombers"},
     {"name": "confidence", "type": "string", "desc": "low|medium|high"},
-    {"name": "fire_id", "type": "string or null", "desc": "Upstream feature id if known"},
+    {"name": "fire_id", "type": "string or null", "desc": "Fire id; Sentinel disconnected parts use {aoi_id}_{part}"},
 ]
 
 

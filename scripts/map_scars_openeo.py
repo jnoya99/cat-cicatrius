@@ -1438,7 +1438,13 @@ def run_aoi_job(
             morph_core=morph_core,
         )
         for f in feats:
-            f["properties"]["fire_id"] = aoi.aoi_id
+            # One fire_id per disconnected polygon part (Explorer groups by fire_id)
+            part_i = f["properties"].get("part")
+            if part_i is None:
+                part_i = 0
+            f["properties"]["aoi_id"] = aoi.aoi_id
+            f["properties"]["seed_id"] = aoi.aoi_id
+            f["properties"]["fire_id"] = f"{aoi.aoi_id}_{part_i}"
             f["properties"]["burn_year"] = year
             f["properties"]["source"] = "sentinel"
             f["properties"]["aoi_source"] = aoi.source
