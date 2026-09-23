@@ -42,11 +42,104 @@ COLUMNS = [
     "year_minus_1",
     "year_minus_2",
     "frac_burned",
-    "severity",
+    "severity",  # baixa|moderada|alta|None (Catalan; Sentinel dNBR)
+    "dnbr",  # mean dNBR float or None
     "source",
     "confidence",
     "fire_id",
 ]
+
+# USGS-style approximate classes on raw dNBR (same as map_scars_openeo)
+_SEVERITY_RANK = {"alta": 3, "moderada": 2, "baixa": 1}
+
+
+def severity_from_dnbr(dnbr) -> str | None:
+    if dnbr is None:
+        return None
+    try:
+        x = float(dnbr)
+    except (TypeError, ValueError):
+        return None
+    if x != x:
+        return None
+    if x < 0.10:
+        return None
+    if x < 0.27:
+        return "baixa"
+    if x < 0.44:
+        return "moderada"
+    return "alta"
+
+
+def normalize_severity(val) -> str | None:
+    """Accept Catalan labels, legacy 0–3 ints, or English synonyms."""
+    if val is None:
+        return None
+    if isinstance(val, float) and val != val:
+        return None
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        # legacy numeric 0–3
+        try:
+            i = int(val)
+        except (TypeError, ValueError):
+            return None
+        return {1: "baixa", 2: "moderada", 3: "alta"}.get(i)
+    s = str(val).strip().lower()
+    if s in ("", "none", "null", "nan", "unknown", "desconeguda", "desconegut"):
+        return None
+    aliases = {
+        "baixa": "baixa",
+        "low": "baixa",
+        "moderada": "moderada",
+        "moderate": "moderada",
+        "moderat": "moderada",
+        "alta": "alta",
+        "high": "alta",
+        "high severity": "alta",
+    }
+    return aliases.get(s)
+
+
+def severity_from_feature(props: dict, source: str) -> tuple[str | None, float | None]:
+    """Return (severity, dnbr) for a scar feature.
+
+    Official/EFFIS: leave null (no dNBR).
+    Sentinel: prefer explicit severity / dnbr_mean; else threshold_proxy → moderada
+    when the feature is a region-grow scar (core threshold present).
+    """
+    dnbr = None
+    for k in ("dnbr", "dnbr_mean", "mean_dnbr", "dNBR", "DNBR"):
+        if k in props and props[k] not in (None, ""):
+            try:
+                dnbr = float(props[k])
+                if dnbr != dnbr:
+                    dnbr = None
+                else:
+                    break
+            except (TypeError, ValueError):
+                pass
+    sev = normalize_severity(props.get("severity"))
+    if sev is None and dnbr is not None:
+        sev = severity_from_dnbr(dnbr)
+    if source == "sentinel" and sev is None:
+        # Local backfill without CDSE: scars require core ≥ ~0.35 → moderada band
+        if props.get("severity_method") == "threshold_proxy" or props.get(
+            "dnbr_threshold_core"
+        ) is not None:
+            sev = "moderada"
+    if source in ("official", "effis", "bombers"):
+        # Never invent severity for non-Sentinel sources
+        if props.get("severity_method") not in ("dnbr_mean", "dnbr_max") and dnbr is None:
+            return None, None
+    return sev, dnbr
+
+
+def better_severity(a: str | None, b: str | None) -> str | None:
+    ra = _SEVERITY_RANK.get(a or "", 0)
+    rb = _SEVERITY_RANK.get(b or "", 0)
+    if ra >= rb:
+        return a if ra else b
+    return b
 
 
 def infer_source(path: Path) -> str:
@@ -113,7 +206,7 @@ def load_scar_frames(scar_paths: list[Path]):
     return frames
 
 
-def sample_polygon_to_cells(geom, burn_year: int | None, source: str, fire_id: str | None, reference_year: int):
+def sample_polygon_to_cells(geom, burn_year: int | None, source: str, fire_id: str | None, reference_year: int, severity: str | None = None, dnbr: float | None = None):
     """Cover polygon exterior bbox with 0.001° cells; keep intersecting ones."""
     from shapely.geometry import box
     from shapely.validation import make_valid
@@ -189,7 +282,8 @@ def sample_polygon_to_cells(geom, burn_year: int | None, source: str, fire_id: s
                         "year_minus_1": 1 if by == reference_year - 1 else 0,
                         "year_minus_2": 1 if by == reference_year - 2 else 0,
                         "frac_burned": round(min(1.0, max(0.0, frac)), 4),
-                        "severity": None,
+                        "severity": severity,
+                        "dnbr": None if dnbr is None else round(float(dnbr), 4),
                         "source": source,
                         "confidence": confidence_for(source),
                         "fire_id": fire_id,
@@ -214,7 +308,8 @@ def empty_parquet(path: Path) -> None:
             "year_minus_1": "int64",
             "year_minus_2": "int64",
             "frac_burned": "float64",
-            "severity": "float64",
+            "severity": "object",
+            "dnbr": "float64",
             "source": "object",
             "confidence": "object",
             "fire_id": "object",
@@ -284,9 +379,22 @@ def merge_rows(rows: list[dict], official_years: set[int] | None = None) -> list
             continue
         if rank.get(src, 0) > rank.get(cur["source"], 0):
             r = {**r, "frac_burned": max(r["frac_burned"], cur["frac_burned"])}
+            # Keep stronger severity / higher dnbr from the displaced row when useful
+            r["severity"] = better_severity(r.get("severity"), cur.get("severity"))
+            rd, cd = r.get("dnbr"), cur.get("dnbr")
+            if rd is None:
+                r["dnbr"] = cd
+            elif cd is not None:
+                r["dnbr"] = max(float(rd), float(cd))
             best[key] = r
         else:
             cur["frac_burned"] = max(cur["frac_burned"], r["frac_burned"])
+            cur["severity"] = better_severity(cur.get("severity"), r.get("severity"))
+            rd, cd = r.get("dnbr"), cur.get("dnbr")
+            if cd is None:
+                cur["dnbr"] = rd
+            elif rd is not None:
+                cur["dnbr"] = max(float(rd), float(cd))
     return list(best.values())
 
 
@@ -363,9 +471,17 @@ def main() -> int:
                     break
             if fire_id is None:
                 fire_id = f"{Path(row['_path']).stem}_{idx}"
+            props = {
+                k: row[k]
+                for k in gdf.columns
+                if k not in ("geometry", "_source", "_path", "_burn_year")
+            }
+            sev, dnbr_v = severity_from_feature(props, source)
             for g in geoms:
                 all_rows.extend(
-                    sample_polygon_to_cells(g, by, source, fire_id, reference_year)
+                    sample_polygon_to_cells(
+                        g, by, source, fire_id, reference_year, severity=sev, dnbr=dnbr_v
+                    )
                 )
 
     off_years = years_with_official(scar_paths)
@@ -385,6 +501,16 @@ def main() -> int:
     args.out_dir.mkdir(parents=True, exist_ok=True)
     df.to_parquet(out_parquet, index=False)
     print(f"Wrote {len(df)} cells → {out_parquet}")
+    if not df.empty:
+        sent = df[df["source"] == "sentinel"]
+        n_sev = int(sent["severity"].notna().sum()) if len(sent) else 0
+        print(
+            f"Sentinel cells with severity: {n_sev}/{len(sent)} "
+            f"({(100.0 * n_sev / len(sent)) if len(sent) else 0:.1f}%)",
+            flush=True,
+        )
+        if n_sev:
+            print(sent["severity"].value_counts(dropna=False).to_string(), flush=True)
 
     # Summary GeoJSON (points)
     features = []

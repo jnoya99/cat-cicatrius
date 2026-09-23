@@ -51,6 +51,37 @@ TMP_DIR = ROOT / ".tmp" / "openeo"
 DNBR_THRESHOLD_CORE = 0.35
 DNBR_THRESHOLD_GROW = 0.22
 DNBR_THRESHOLD = DNBR_THRESHOLD_CORE  # backwards-compat alias
+
+
+# USGS/MTBS-style approximate classes on raw dNBR (Key & Benson /1000):
+#   baixa ≈ low (0.10–0.27); moderada ≈ moderate-low (0.27–0.44);
+#   alta ≈ moderate-high + high (≥0.44). Catalan labels for the app.
+SEVERITY_BAIXA = "baixa"
+SEVERITY_MODERADA = "moderada"
+SEVERITY_ALTA = "alta"
+# Proxy when polygons exist but the dNBR raster was not kept (backfill):
+# region-grow requires a core ≥ DNBR_THRESHOLD_CORE (0.35) → solidly "moderada".
+SEVERITY_PROXY_NO_RASTER = SEVERITY_MODERADA
+
+
+def severity_from_dnbr(dnbr: float | None) -> str | None:
+    """Map mean/max dNBR to Catalan severity class; None if unburned/unknown."""
+    if dnbr is None:
+        return None
+    try:
+        x = float(dnbr)
+    except (TypeError, ValueError):
+        return None
+    if x != x:  # NaN
+        return None
+    if x < 0.10:
+        return None
+    if x < 0.27:
+        return SEVERITY_BAIXA
+    if x < 0.44:
+        return SEVERITY_MODERADA
+    return SEVERITY_ALTA
+
 CDSE_URL = "https://openeo.dataspace.copernicus.eu"
 BUFFER_OFFICIAL_M = 800.0
 BUFFER_EFFIS_M = 1200.0
@@ -1148,6 +1179,7 @@ def polygonize_tiff(
     Core: dNBR ≥ threshold_core; grow contiguous ≥ threshold_grow.
     Optional WorldCover forest/scrub mask. Optional morph opening on core only.
     Drops parts < min_ha. Optionally clips to seed ⊕ CLIP_SEED_BUFFER_M.
+    Persists per-part dnbr_mean / dnbr_max and Catalan severity (baixa|moderada|alta).
     """
     import numpy as np
     import rasterio
@@ -1185,21 +1217,33 @@ def polygonize_tiff(
         if not mask.any():
             return []
 
+        # Connected components as vector parts; stats from dNBR under each part.
         shapes_gen = rio_features.shapes(
-            data.astype("float32"),
+            np.ones(mask.shape, dtype=np.uint8),
             mask=mask.astype("uint8"),
             transform=transform,
         )
         geoms = []
-        for geom, val in shapes_gen:
-            if val is None:
+        stats = []  # parallel (mean, max)
+        for geom, _val in shapes_gen:
+            if geom is None:
                 continue
             g = shape(geom)
             if g.is_empty or g.area <= 0:
                 continue
+            inside = ~rio_features.geometry_mask(
+                [geom], out_shape=data.shape, transform=transform, invert=False
+            )
+            vals = data[inside]
+            vals = vals[np.isfinite(vals)]
+            if vals.size == 0:
+                continue
             geoms.append(g)
+            stats.append((float(vals.mean()), float(vals.max())))
         if not geoms:
             return []
+        # Dissolve touching parts then re-attach max severity among contributors
+        # via spatial overlap with original components (keeps mean/max honest).
         merged = unary_union(geoms)
         parts = list(merged.geoms) if merged.geom_type.startswith("Multi") else [merged]
         import geopandas as gpd
@@ -1208,6 +1252,11 @@ def polygonize_tiff(
         if crs is None:
             gs = gs.set_crs("EPSG:4326")
         gs = gs.to_crs("EPSG:4326")
+        # Original component geoms in WGS84 for stat transfer
+        comps = gpd.GeoSeries(geoms, crs=crs)
+        if crs is None:
+            comps = comps.set_crs("EPSG:4326")
+        comps = comps.to_crs("EPSG:4326")
 
         if clip_geom_wgs84 is not None and not getattr(clip_geom_wgs84, "is_empty", True):
             seed_m = (
@@ -1232,6 +1281,30 @@ def polygonize_tiff(
             area_ha = float(g_m.area / 10_000.0)
             if area_ha < min_ha:
                 continue
+            # Aggregate dNBR from overlapping original components (area-weighted mean)
+            w_sum = 0.0
+            mean_acc = 0.0
+            max_acc = None
+            for comp, (mn, mx) in zip(comps, stats):
+                try:
+                    inter = g_wgs.intersection(comp)
+                except Exception:
+                    continue
+                if inter is None or inter.is_empty:
+                    continue
+                w = float(inter.area)
+                if w <= 0:
+                    continue
+                mean_acc += mn * w
+                w_sum += w
+                max_acc = mx if max_acc is None else max(max_acc, mx)
+            if w_sum > 0:
+                dnbr_mean = mean_acc / w_sum
+                dnbr_max = float(max_acc) if max_acc is not None else dnbr_mean
+            else:
+                dnbr_mean = None
+                dnbr_max = None
+            sev = severity_from_dnbr(dnbr_mean)
             feats.append(
                 {
                     "type": "Feature",
@@ -1240,6 +1313,10 @@ def polygonize_tiff(
                         "area_ha": round(area_ha, 3),
                         "dnbr_threshold_core": threshold_core,
                         "dnbr_threshold_grow": threshold_grow,
+                        "dnbr_mean": None if dnbr_mean is None else round(float(dnbr_mean), 4),
+                        "dnbr_max": None if dnbr_max is None else round(float(dnbr_max), 4),
+                        "severity": sev,
+                        "severity_method": "dnbr_mean" if sev else None,
                         "forest_mask": "esa_worldcover_2021_10_20"
                         if worldcover_path
                         else None,
@@ -1248,6 +1325,7 @@ def polygonize_tiff(
                 }
             )
     return feats
+
 
 
 def run_aoi_job(

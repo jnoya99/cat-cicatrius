@@ -67,10 +67,24 @@ Només cel·les cremades / intersectades (sparses):
 | `burn_year` | int | Any del foc |
 | `year_minus_1` / `year_minus_2` | 0/1 | Relatius a `reference_year` del manifest |
 | `frac_burned` | 0–1 | Fracció de la cel·la |
-| `severity` | 0–3 o null | Opcional |
+| `severity` | `baixa`/`moderada`/`alta` o null | Severitat dNBR (només Sentinel; oficial/EFFIS → null) |
+| `dnbr` | float o null | Mitjana dNBR dels píxels cremats (si hi ha raster) |
 | `source` | string | `official` \| `sentinel` \| `effis` \| `bombers` |
 | `confidence` | string | `low` \| `medium` \| `high` |
 | `fire_id` | string \| null | Id amunt |
+
+
+### Severitat (`severity`) — classes dNBR
+
+Per a cicatrius **Sentinel** (openEO dNBR), la severitat es deriva de la mitjana de dNBR dels píxels cremats (classes aprox. USGS/MTBS):
+
+| Classe | dNBR (aprox.) | Etiqueta |
+|---|---|---|
+| baixa | 0,10 – 0,27 | `baixa` |
+| moderada | 0,27 – 0,44 | `moderada` |
+| alta | ≥ 0,44 | `alta` |
+
+Si el polígon Sentinel existeix però el GeoTIFF dNBR ja no és al disc (execucions anteriors), es fa un **proxy local** `moderada` (`severity_method=threshold_proxy`): el region-grow exigeix un nucli ≥ 0,35, dins la banda moderada. Les cel·les **oficials / EFFIS** no tenen dNBR → `severity` i `dnbr` queden `null`.
 
 ### URLs de consum (un cop activat Pages / després del primer push)
 

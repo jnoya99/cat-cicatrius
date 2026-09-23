@@ -2,8 +2,8 @@
   "version": 1,
   "product": "cat-cicatrius",
   "description": "Cicatrius d'incendis forestals alineades a la malla 0.001° de Bolets Explorador",
-  "last_run_utc": "2026-09-23T14:03:06Z",
-  "last_run_europe_madrid": "2026-09-23T16:03:06+0200",
+  "last_run_utc": "2026-09-23T14:36:17Z",
+  "last_run_europe_madrid": "2026-09-23T16:36:17+0200",
   "reference_year": 2026,
   "grid": {
     "crs": "EPSG:4326",
@@ -15,12 +15,12 @@
   "files": {
     "burned_cells.parquet": {
       "path": "docs/burned_cells.parquet",
-      "sha256": "1502504b23b5d5eb3719d47a90bd06478dcc43b88234906084f2e131392bb16c",
+      "sha256": "16328f2c663aab053e7bf0f235adeaa9bb30d258ffc8e27f443205bdaeffbf6b",
       "n_rows": 428588
     },
     "burned_cells.geojson": {
       "path": "docs/burned_cells.geojson",
-      "sha256": "97ba1bf21d787b4a9f01815eabbfca65f881c4505327a15b3fdac3ee78752c5a",
+      "sha256": "8301741d4bcb6b51987728c9da6035232c92aa4e5ec0eb2c4ce0ed22cf6b5255",
       "note": "Summary points (may be capped); prefer parquet for full sparse set"
     }
   },
@@ -62,8 +62,13 @@
     },
     {
       "name": "severity",
-      "type": "int 0–3 or null",
-      "desc": "Optional severity class"
+      "type": "string or null",
+      "desc": "baixa|moderada|alta from Sentinel dNBR (null for official/EFFIS)"
+    },
+    {
+      "name": "dnbr",
+      "type": "float or null",
+      "desc": "Mean dNBR of burn pixels when available"
     },
     {
       "name": "source",
