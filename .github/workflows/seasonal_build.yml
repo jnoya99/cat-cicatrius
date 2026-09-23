@@ -1,15 +1,14 @@
 name: seasonal-build
 
-# Seasonal (NOT daily FIRMS): before morel season.
+# Monthly refresh (NOT daily FIRMS): official / EFFIS / product on the 1st.
 # Cron is always UTC on GitHub Actions.
-#   0 6 1 11,2 *  → 06:00 UTC on 1 Nov and 1 Feb
-#   Europe/Madrid: ≈ 07:00 CET (Feb) / ≈ 08:00 CET→ actually Nov is CET (UTC+1) → 07:00;
-#                  Feb is CET → 07:00; if CEST ever applied would be 08:00.
+#   17 6 1 * *  → 06:17 UTC on day 1 of every month
+#   Europe/Madrid: ≈ 07:17 CET (winter) / ≈ 08:17 CEST (summer).
 # Prefer workflow_dispatch for manual runs.
 
 "on":
   schedule:
-    - cron: "0 6 1 11,2 *"
+    - cron: "17 6 1 * *"
   workflow_dispatch:
 
 concurrency:

@@ -13,7 +13,7 @@ Els bolets de primavera (p. ex. múrgoles) reaccionen a cicatrius de l’estiu *
    - (b) Sentinel-2 pre/post **dNBR** (region growing + màscara bosc/matoll) només omple anys/àrees **sense** cobertura oficial (no sobreescriu cel·les oficials);
    - (c) EFFIS WFS opcional quan no hi ha oficial de l’any;
    - evitar buffers minúsculs.
-3. **Publicar 1–2 cops** abans de la temporada de múrgoles (p. ex. **1 nov** i **1 feb** Europe/Madrid).
+3. **Publicar un cop al mes** (dia **1**, Europe/Madrid) per refrescar oficial/EFFIS/producte; abans de la temporada de múrgoles això ja cobreix nov–feb.
 
 ## Malla de l’app (crítica)
 
@@ -42,7 +42,7 @@ dense_index = jj * NLON + ii
 
 | Peça | Descripció |
 |---|---|
-| **Action estacional** | Cron `0 6 1 11,2 *` (06:00 UTC el **1 nov** i **1 feb**) + `workflow_dispatch` |
+| **Action estacional** | Cron `17 6 1 * *` (06:17 UTC el **dia 1 de cada mes**) + `workflow_dispatch` |
 | `scripts/ingest_gencat.py` | Taules Socrata → `events/*.csv` |
 | `scripts/fetch_official_shp.py` | Baixa `incendis{YY}.zip` de gencat.cat → GeoJSON a `scars/` |
 | `scripts/fetch_effis.py` | WFS EFFIS bbox Catalunya (best-effort) |
@@ -52,7 +52,9 @@ dense_index = jj * NLON + ii
 | `scripts/publish_docs.py` | Manifest + checksums a `docs/manifest.json` |
 | **GitHub Pages / raw / jsDelivr** | Consumeix `docs/` |
 
-> **Horari:** el cron de GitHub Actions és sempre UTC. `0 6 1 11,2 *` → ~07:00 Europe/Madrid (CET) el 1 de novembre i el 1 de febrer.
+> **Horari:** el cron de GitHub Actions és sempre UTC. `17 6 1 * *` → 06:17 UTC el dia **1 de cada mes** (~07:17 CET / ~08:17 CEST Europe/Madrid).
+>
+> Les execucions mensuals refresquen oficial/EFFIS/producte. El pas Sentinel (CDSE openEO) només corre si hi ha secrets `CDSE_CLIENT_*` i **pot consumir crèdits cada mes** — acceptat per tenir actualitzacions mensuals.
 
 ## Producte `docs/burned_cells.parquet`
 
