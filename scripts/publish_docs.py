@@ -90,6 +90,16 @@ def main() -> int:
     parquet = DOCS / "burned_cells.parquet"
     n_cells = parquet_nrows(parquet)
 
+    # Keep recent_burns in sync with parquet when present
+    rb_path = DOCS / "recent_burns.bin.gz"
+    if parquet.exists():
+        try:
+            from build_recent_burns import build_recent_burns
+
+            build_recent_burns(parquet, rb_path, reference_year=reference_year)
+        except Exception as e:
+            print(f"WARN: could not rebuild recent_burns: {e}")
+
     grid_path = ROOT / "grid" / "app_grid.json"
     with open(grid_path, encoding="utf-8") as f:
         grid = json.load(f)
@@ -118,6 +128,12 @@ def main() -> int:
                 "path": "docs/burned_cells.geojson",
                 "sha256": file_sha256(gj),
                 "note": "Summary points (may be capped); prefer parquet for full sparse set",
+            },
+            "recent_burns.bin.gz": {
+                "path": "docs/recent_burns.bin.gz",
+                "sha256": file_sha256(DOCS / "recent_burns.bin.gz"),
+                "note": "RB01 light index (last 9y) for fireFac/fireSuppress; gunzip in browser",
+                "bytes": (DOCS / "recent_burns.bin.gz").stat().st_size if (DOCS / "recent_burns.bin.gz").exists() else None,
             },
         },
         "schema": SCHEMA_COLUMNS,

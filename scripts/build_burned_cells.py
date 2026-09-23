@@ -628,6 +628,23 @@ def main() -> int:
     with open(out_geojson, "w", encoding="utf-8") as f:
         json.dump({"type": "FeatureCollection", "features": features}, f)
         f.write("\n")
+
+    # Lightweight recent-burns index for explorer fireFac/fireSuppress (no full parquet).
+    try:
+        from build_recent_burns import build_recent_burns
+
+        rb = build_recent_burns(
+            out_parquet,
+            args.out_dir / "recent_burns.bin.gz",
+            reference_year=reference_year,
+        )
+        print(
+            f"Wrote recent_burns RB01 n={rb['n']} gz={rb['gz_bytes']} → {rb['path']}",
+            flush=True,
+        )
+    except Exception as e:
+        print(f"WARN: recent_burns build skipped: {e}", flush=True)
+
     print(f"Wrote {len(features)} summary points → {out_geojson}")
     return 0
 
