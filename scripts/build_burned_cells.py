@@ -116,6 +116,20 @@ def load_scar_frames(scar_paths: list[Path]):
 def sample_polygon_to_cells(geom, burn_year: int | None, source: str, fire_id: str | None, reference_year: int):
     """Cover polygon exterior bbox with 0.001° cells; keep intersecting ones."""
     from shapely.geometry import box
+    from shapely.validation import make_valid
+
+    if geom is None or geom.is_empty:
+        return []
+    if not geom.is_valid:
+        try:
+            geom = make_valid(geom)
+        except Exception:
+            try:
+                geom = geom.buffer(0)
+            except Exception:
+                return []
+    if geom is None or geom.is_empty:
+        return []
 
     minx, miny, maxx, maxy = geom.bounds
     s = step()
@@ -144,9 +158,17 @@ def sample_polygon_to_cells(geom, burn_year: int | None, source: str, fire_id: s
                 print("  warning: cell cap hit for one polygon", flush=True)
                 return rows
             cell = box(*cell_bbox(lon, lat))
-            if cell.intersects(geom):
-                inter = cell.intersection(geom)
-                frac = float(inter.area / cell.area) if cell.area > 0 else 0.0
+            try:
+                intersects = cell.intersects(geom)
+            except Exception:
+                intersects = False
+            if intersects:
+                try:
+                    inter = cell.intersection(geom)
+                    frac = float(inter.area / cell.area) if cell.area > 0 else 0.0
+                except Exception:
+                    lat = round_coord(lat + s)
+                    continue
                 if frac <= 0:
                     lat = round_coord(lat + s)
                     continue

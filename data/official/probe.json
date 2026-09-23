@@ -2,13 +2,43 @@
   "base_url_pattern": "http://www.gencat.cat/agricultura/sig/bases/incendis{yy}.zip",
   "results": [
     {
-      "year": 2023,
-      "url": "http://www.gencat.cat/agricultura/sig/bases/incendis23.zip",
+      "year": 2015,
+      "url": "http://www.gencat.cat/agricultura/sig/bases/incendis15.zip",
       "available": true
     },
     {
-      "year": 2024,
-      "url": "http://www.gencat.cat/agricultura/sig/bases/incendis24.zip",
+      "year": 2016,
+      "url": "http://www.gencat.cat/agricultura/sig/bases/incendis16.zip",
+      "available": true
+    },
+    {
+      "year": 2017,
+      "url": "http://www.gencat.cat/agricultura/sig/bases/incendis17.zip",
+      "available": true
+    },
+    {
+      "year": 2018,
+      "url": "http://www.gencat.cat/agricultura/sig/bases/incendis18.zip",
+      "available": true
+    },
+    {
+      "year": 2019,
+      "url": "http://www.gencat.cat/agricultura/sig/bases/incendis19.zip",
+      "available": true
+    },
+    {
+      "year": 2020,
+      "url": "http://www.gencat.cat/agricultura/sig/bases/incendis20.zip",
+      "available": true
+    },
+    {
+      "year": 2021,
+      "url": "http://www.gencat.cat/agricultura/sig/bases/incendis21.zip",
+      "available": true
+    },
+    {
+      "year": 2022,
+      "url": "http://www.gencat.cat/agricultura/sig/bases/incendis22.zip",
       "available": true
     }
   ]
