@@ -111,7 +111,9 @@ jobs:
             --years "${YEARS}" \
             --max-features "${MAX_FEATURES}" \
             --post-windows 2 \
-            --forest-mask \
+          # Skip per-AOI WorldCover CDSE jobs (halves runtime); dNBR still real.
+            --min-ha 1 \
+            --no-forest-mask \
             ${FORCE_FLAG}
 
       - name: Upload backfill stats artifact
