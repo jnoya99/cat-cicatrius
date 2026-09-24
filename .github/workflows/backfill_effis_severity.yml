@@ -107,11 +107,11 @@ jobs:
         run: |
           set -euo pipefail
           echo "years=${YEARS} max_features=${MAX_FEATURES} force='${FORCE_FLAG}'"
+          # Skip per-AOI WorldCover CDSE jobs (halves runtime); dNBR still real.
           python scripts/backfill_effis_severity.py \
             --years "${YEARS}" \
             --max-features "${MAX_FEATURES}" \
             --post-windows 2 \
-          # Skip per-AOI WorldCover CDSE jobs (halves runtime); dNBR still real.
             --min-ha 1 \
             --no-forest-mask \
             ${FORCE_FLAG}
