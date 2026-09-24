@@ -84,7 +84,7 @@ Per a cicatrius **Sentinel** (openEO dNBR), la severitat es deriva de la mitjana
 | moderada | 0,27 – 0,44 | `moderada` |
 | alta | ≥ 0,44 | `alta` |
 
-Si el polígon Sentinel existeix però el GeoTIFF dNBR ja no és al disc (execucions anteriors), es fa un **proxy local** `moderada` (`severity_method=threshold_proxy`): el region-grow exigeix un nucli ≥ 0,35, dins la banda moderada. Les cel·les **oficials / EFFIS** no tenen dNBR → `severity` i `dnbr` queden `null`.
+Si el polígon Sentinel existeix però el GeoTIFF dNBR ja no és al disc (execucions anteriors), es fa un **proxy local** `moderada` (`severity_method=threshold_proxy`): el region-grow exigeix un nucli ≥ 0,35, dins la banda moderada. Les cel·les **oficials** no tenen dNBR → `severity`/`dnbr` `null`. Les cel·les **EFFIS dins Catalunya** poden rebre dNBR real via `scripts/backfill_effis_severity.py` (`severity_method=dnbr_mean_effis_backfill`); fora de CAT o sense imatgeria vàlida romanen `null` (mai s’inventa severitat).
 
 ### URLs de consum (un cop activat Pages / després del primer push)
 
@@ -190,6 +190,25 @@ Codi: MIT (vegeu `LICENSE`). Les dades respecten la llicència de cada proveïdo
 | `--morph-core` | on | Opening 1px només al nucli (abans de créixer) |
 
 El producte `build_burned_cells.py` priorita `official_{year}`: si existeix, les cel·les d’aquell any són oficials (sentinel només omple cel·les sense oficial; EFFIS es salta per a anys amb oficial). Així, amb `reference_year=2026`, `year_minus_2` (2024) surt gairebé tot `source=official` si hi ha `official_2024.geojson`.
+
+
+
+## Backfill severitat EFFIS (Catalunya, 2025/2026)
+
+Workflow manual **`backfill-effis-severity`**: calcula dNBR real (mateix pipeline CDSE openEO) **dins** els polígons EFFIS de Catalunya i escriu `severity` / `dnbr_mean` / `severity_method=dnbr_mean_effis_backfill` a `scars/effis_{year}.geojson`.
+
+- No esborra ni filtra cel·les EFFIS fora de CAT.
+- No inventa proxy (`moderada` falsa): si no hi ha imatgeria vàlida, `severity` queda `null`.
+- No toca cicatrius Sentinel ni l’HTML del Bolets Explorador.
+- Després reconstrueix `docs/burned_cells.parquet` + manifest (+ `recent_burns.bin.gz` si aplica).
+
+```bash
+# local (cal CDSE_CLIENT_ID / CDSE_CLIENT_SECRET)
+python scripts/backfill_effis_severity.py --years 2025,2026 --dry-run
+python scripts/backfill_effis_severity.py --years 2025,2026
+python scripts/build_burned_cells.py --reference-year 2026
+python scripts/publish_docs.py --reference-year 2026
+```
 
 ## Proves 2024 / 2025 / 2026
 

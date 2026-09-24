@@ -103,7 +103,8 @@ def normalize_severity(val) -> str | None:
 def severity_from_feature(props: dict, source: str) -> tuple[str | None, float | None]:
     """Return (severity, dnbr) for a scar feature.
 
-    Official/EFFIS: leave null (no dNBR).
+    Official/EFFIS: leave null unless a real dNBR backfill is present
+    (severity_method dnbr_mean / dnbr_max / dnbr_mean_effis_backfill, or dnbr_mean).
     Sentinel: prefer explicit severity / dnbr_mean; else threshold_proxy → moderada
     when the feature is a region-grow scar (core threshold present).
     """
@@ -128,8 +129,11 @@ def severity_from_feature(props: dict, source: str) -> tuple[str | None, float |
         ) is not None:
             sev = "moderada"
     if source in ("official", "effis", "bombers"):
-        # Never invent severity for non-Sentinel sources
-        if props.get("severity_method") not in ("dnbr_mean", "dnbr_max") and dnbr is None:
+        # Never invent severity for non-Sentinel sources.
+        # Accept real dNBR backfill onto EFFIS (dnbr_mean_effis_backfill).
+        method = props.get("severity_method")
+        real_methods = ("dnbr_mean", "dnbr_max", "dnbr_mean_effis_backfill")
+        if method not in real_methods and dnbr is None:
             return None, None
     return sev, dnbr
 
